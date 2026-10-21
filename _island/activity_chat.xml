@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#FF000000"
+    android:orientation="vertical">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:paddingTop="14dp"
+        android:paddingBottom="14dp"
+        android:text="Marc"
+        android:textColor="#FFE8B15A"
+        android:textSize="17sp" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="0.5dp"
+        android:background="#14FFFFFF" />
+
+    <TextView
+        android:id="@+id/empty_chat"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:gravity="center"
+        android:text="No messages"
+        android:textColor="#99EBEBF5"
+        android:textSize="16sp" />
+
+    <ListView
+        android:id="@+id/chat_list"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:clipToPadding="false"
+        android:divider="@android:color/transparent"
+        android:dividerHeight="8dp"
+        android:paddingStart="16dp"
+        android:paddingTop="12dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="8dp"
+        android:stackFromBottom="true"
+        android:transcriptMode="alwaysScroll"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="12dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="2dp">
+
+        <TextView
+            android:id="@+id/target_auto"
+            android:layout_width="wrap_content"
+            android:layout_height="32dp"
+            android:background="#22E8B15A"
+            android:gravity="center"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:text="Auto"
+            android:textColor="#FFE8B15A"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/target_phone"
+            android:layout_width="wrap_content"
+            android:layout_height="32dp"
+            android:layout_marginStart="8dp"
+            android:background="#14FFFFFF"
+            android:gravity="center"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:text="Phone"
+            android:textColor="#99EBEBF5"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/target_laptop"
+            android:layout_width="wrap_content"
+            android:layout_height="32dp"
+            android:layout_marginStart="8dp"
+            android:background="#14FFFFFF"
+            android:gravity="center"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:text="Laptop"
+            android:textColor="#99EBEBF5"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/target_server"
+            android:layout_width="wrap_content"
+            android:layout_height="32dp"
+            android:layout_marginStart="8dp"
+            android:background="#14FFFFFF"
+            android:gravity="center"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:text="Server"
+            android:textColor="#99EBEBF5"
+            android:textSize="13sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="12dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="6dp">
+
+        <EditText
+            android:id="@+id/composer"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1"
+            android:background="@drawable/composer_bg"
+            android:hint="Message"
+            android:imeOptions="actionSend"
+            android:inputType="textCapSentences"
+            android:maxLines="1"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:textColor="#FFF5F5F7"
+            android:textColorHint="#66EBEBF5"
+            android:textSize="16sp" />
+
+        <TextView
+            android:id="@+id/send_button"
+            android:layout_width="wrap_content"
+            android:layout_height="44dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/btn_send"
+            android:gravity="center"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:text="Send"
+            android:textColor="#FF000000"
+            android:textSize="16sp" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/listen_button"
+        android:layout_width="match_parent"
+        android:layout_height="44dp"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="14dp"
+        android:background="@drawable/btn_listen"
+        android:gravity="center"
+        android:text="Listen"
+        android:textColor="#FFE8B15A"
+        android:textSize="16sp" />
+</LinearLayout>

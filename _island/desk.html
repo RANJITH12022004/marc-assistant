@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+  <title>Roxx</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #000;
+      --panel: #0c0c0e;
+      --line: rgba(232, 177, 90, 0.28);
+      --text: #f5f5f7;
+      --muted: #8e8e93;
+      --amber: #e8b15a;
+      --red: #ff453a;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; }
+    .app { height: 100dvh; min-height: 0; display: grid; grid-template-columns: 196px minmax(0, 1fr); grid-template-rows: 36px minmax(0, 1fr); }
+    .menubar { grid-column: 1 / -1; display: flex; align-items: center; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 13px; }
+    .menubar button, .drop a { color: var(--muted); background: none; border: 0; font: inherit; padding: 8px 10px; border-radius: 6px; cursor: pointer; text-decoration: none; display: block; }
+    .menubar button:hover, .drop a:hover, .nav a:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+    .menu { position: relative; }
+    .drop { display: none; position: absolute; top: 100%; left: 0; min-width: 140px; background: #121214; border: 1px solid var(--line); border-radius: 8px; padding: 4px; z-index: 5; }
+    .menu:hover .drop, .menu:focus-within .drop { display: block; }
+    .grow { flex: 1; }
+    .nav { border-right: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; padding: 18px 12px; gap: 2px; min-height: 0; }
+    .brand { padding: 0 10px 16px; }
+    .brand strong { display: block; font-size: 18px; font-weight: 600; letter-spacing: -0.03em; }
+    .brand span { color: var(--muted); font-size: 12px; }
+    .nav a, .tabbar a { color: var(--muted); text-decoration: none; border-radius: 10px; }
+    .nav a { padding: 9px 12px; }
+    .nav a[aria-current="page"], .tabbar a[aria-current="page"] { color: var(--amber); background: rgba(232, 177, 90, 0.1); }
+    .shell { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 22px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+    header h1 { margin: 0; font-size: 18px; font-weight: 560; letter-spacing: -0.02em; }
+    .presence { font-size: 13px; color: var(--muted); }
+    .presence.here { color: #8fb9a2; }
+    .presence.hot { color: var(--red); }
+    .page { display: none; flex: 1; min-height: 0; overflow: auto; }
+    .page.active { display: flex; flex-direction: column; }
+    .cluster { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 8px 16px 12px; }
+    .big, .small { min-width: 0; min-height: 0; overflow: hidden; display: grid; }
+    .big { flex: 1.35; grid-template-columns: 1fr 1fr; }
+    .small { flex: 1; grid-template-columns: 1fr 1fr 1fr; }
+    canvas { width: 100%; height: 100%; display: block; min-width: 0; min-height: 0; }
+    .strip { text-align: center; color: #c8c8cc; line-height: 1.5; margin: 4px 12px 8px; white-space: pre-line; font-size: 14px; }
+    .list { padding: 8px 22px 24px; }
+    .row { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; padding: 12px 0; border-top: 1px solid rgba(255,255,255,0.08); }
+    .row span:first-child { color: var(--muted); }
+    .value { font-variant-numeric: tabular-nums; }
+    .track { height: 3px; margin-top: 8px; background: rgba(255,255,255,0.08); border-radius: 99px; overflow: hidden; }
+    .fill { height: 100%; width: 0; background: var(--amber); }
+    .services { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 22px 0; }
+    .pill { border: 1px solid rgba(255,255,255,0.12); border-radius: 999px; padding: 6px 10px; color: var(--muted); font-size: 13px; }
+    .pill.on { color: #8fb9a2; }
+    .pill.pick { cursor: pointer; }
+    .pill.pick.on { color: var(--amber); border-color: rgba(232,177,90,0.7); }
+    #chat { overflow: hidden; }
+    #log { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 12px 22px; }
+    .hint { color: var(--muted); }
+    .line { margin: 0 0 14px; }
+    .you { white-space: pre-wrap; }
+    .marc { color: var(--amber); white-space: pre-wrap; }
+    .machine, .steps { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .step.fail { color: var(--red); }
+    form { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; border-top: 1px solid rgba(255,255,255,0.08); }
+    .targets { display: flex; gap: 6px; width: 100%; }
+    input, button { font: inherit; font-size: 16px; }
+    input { flex: 1; min-width: 0; background: #101010; color: var(--text); border: 1px solid rgba(232,177,90,0.45); border-radius: 10px; padding: 12px 14px; }
+    button.send { background: transparent; color: var(--amber); border: 1px solid rgba(232,177,90,0.7); border-radius: 10px; padding: 10px 14px; cursor: pointer; }
+    .yesno { display: flex; gap: 8px; margin-top: 8px; }
+    .tabbar { display: none; }
+    .note { color: var(--muted); padding: 0 22px; line-height: 1.5; }
+    @media (max-width: 800px) {
+      .app { grid-template-columns: 1fr; grid-template-rows: 36px minmax(0, 1fr) auto; }
+      .nav { display: none; }
+      header { padding: 12px 16px; }
+      .cluster { justify-content: center; padding-bottom: 4px; }
+      .big { flex: none; height: 46vw; }
+      .small { flex: none; height: 32vw; }
+      .list, #log { padding-left: 16px; padding-right: 16px; }
+      .tabbar { display: grid; grid-template-columns: repeat(5, 1fr); border-top: 1px solid var(--line); background: var(--panel); padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); }
+      .tabbar a { text-align: center; font-size: 12px; padding: 8px 2px; }
+      .menubar { overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="menubar" role="menubar">
+      <button type="button" data-page="chat">Chat</button>
+      <button type="button" data-page="agent">Agent</button>
+      <div class="menu">
+        <button type="button">Devices</button>
+        <div class="drop">
+          <a href="/laptop" data-page="laptop">Laptop</a>
+          <a href="/phone" data-page="phone">Phone</a>
+        </div>
+      </div>
+      <button type="button" data-page="server">Server</button>
+      <div class="menu">
+        <button type="button">View</button>
+        <div class="drop">
+          <a href="/server" data-page="server">Meters</a>
+          <a href="/disks" data-page="disks">Disks</a>
+          <a href="/system" data-page="system">System</a>
+        </div>
+      </div>
+      <button type="button" data-page="settings">Settings</button>
+      <span class="grow"></span>
+      <div id="presence" class="presence">Away</div>
+    </div>
+    <nav class="nav" aria-label="Sections">
+      <div class="brand"><strong>Roxx</strong><span>Marc Server</span></div>
+      <a href="/chat" data-page="chat">Chat</a>
+      <a href="/agent" data-page="agent">Agent</a>
+      <a href="/laptop" data-page="laptop">Laptop</a>
+      <a href="/phone" data-page="phone">Phone</a>
+      <a href="/server" data-page="server">Server</a>
+      <a href="/disks" data-page="disks">Disks</a>
+      <a href="/system" data-page="system">System</a>
+      <a href="/settings" data-page="settings">Settings</a>
+    </nav>
+    <div class="shell">
+      <header>
+        <h1 id="title">Chat</h1>
+      </header>
+      <section class="page" id="chat" data-page="chat">
+        <div id="log"><p class="hint">Ask Marc, or tell it what to do on the laptop, the phone, or the server.</p></div>
+        <form id="composer">
+          <div class="targets">
+            <span class="pill pick on" data-target="auto">Auto</span>
+            <span class="pill pick" data-target="phone">Phone</span>
+            <span class="pill pick" data-target="laptop">Laptop</span>
+            <span class="pill pick" data-target="server">Server</span>
+          </div>
+          <input id="text" placeholder="Tell Marc" autocomplete="off" />
+          <button class="send" id="send" type="submit">Send</button>
+        </form>
+      </section>
+      <section class="page" id="agent" data-page="agent">
+        <div class="list" id="agent-list"></div>
+      </section>
+      <section class="page" id="laptop" data-page="laptop">
+        <div class="list" id="laptop-list"></div>
+      </section>
+      <section class="page" id="phone" data-page="phone">
+        <div class="list" id="phone-list"></div>
+      </section>
+      <section class="page" id="server" data-page="server">
+        <div class="cluster">
+          <div class="big">
+            <canvas id="cpu"></canvas>
+            <canvas id="temp"></canvas>
+          </div>
+          <div class="small">
+            <canvas id="ram" data-satellite="1"></canvas>
+            <canvas id="store" data-satellite="1"></canvas>
+            <canvas id="link" data-satellite="1"></canvas>
+          </div>
+        </div>
+        <p id="strip" class="strip">No reading</p>
+      </section>
+      <section class="page" id="disks" data-page="disks">
+        <div class="list" id="disk-list"></div>
+      </section>
+      <section class="page" id="system" data-page="system">
+        <div class="services" id="services"></div>
+        <div class="list" id="system-list"></div>
+      </section>
+      <section class="page" id="settings" data-page="settings">
+        <p class="note">This desk talks to the small Qwen on the home server. Chat can run the laptop, the phone, and the server. Questions go to Qwen. Commands run as tools. Server tools are status, allowlisted restarts, and docker for n8n. There is no raw shell.</p>
+        <div class="list" id="settings-list"></div>
+      </section>
+    </div>
+    <nav class="tabbar" aria-label="Sections">
+      <a href="/chat" data-page="chat">Chat</a>
+      <a href="/agent" data-page="agent">Agent</a>
+      <a href="/server" data-page="server">Server</a>
+      <a href="/laptop" data-page="laptop">Laptop</a>
+      <a href="/settings" data-page="settings">Settings</a>
+    </nav>
+  </div>
+  <script>
+    const AMBER = "#E8B15A";
+    const RED = "#FF453A";
+    const WHITE = "#F5F5F7";
+    const START = (150 * Math.PI) / 180;
+    const SWEEP = (240 * Math.PI) / 180;
+    const PAGES = {
+      chat: "Chat", agent: "Agent", laptop: "Laptop", phone: "Phone",
+      server: "Server", disks: "Disks", system: "System", settings: "Settings"
+    };
+    const ACTION = /\b(open|launch|start|close|quit|exit|play|pause|resume|next|previous|stop|send|call|dial|text|whatsapp|instagram|search|volume|mute|restart|docker|containers|ollama|n8n|ls|files|journal|install|shell|bash|directory|folder)\b|\bon\s+(?:my\s+|the\s+)?(?:laptop|computer|pc|phone|mobile|server|linux)\b|\/home\/rox/i;
+
+    function clamp(value) { return Math.max(0, Math.min(1, value)); }
+
+    function paint(canvas, shown, value, caption, satellite) {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width < 2 || rect.height < 2) return;
+      const ratio = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.floor(rect.width * ratio));
+      const height = Math.max(1, Math.floor(rect.height * ratio));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, width, height);
+      const size = Math.min(width, height) * 0.92;
+      const cx = width / 2;
+      const cy = height / 2;
+      const radius = size / 2;
+      const draw = clamp(shown);
+      const hot = draw >= 0.82;
+      const lit = hot ? RED : AMBER;
+      ctx.strokeStyle = WHITE;
+      ctx.lineWidth = Math.max(2 * ratio, radius * 0.035);
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius * 0.96, 0, Math.PI * 2);
+      ctx.stroke();
+      const bandR = radius * 0.78;
+      ctx.strokeStyle = "rgba(255,69,58,0.45)";
+      ctx.lineWidth = Math.max(3 * ratio, radius * 0.08);
+      ctx.beginPath();
+      ctx.arc(cx, cy, bandR, START + SWEEP * 0.82, START + SWEEP, false);
+      ctx.stroke();
+      for (let i = 0; i <= 12; i += 1) {
+        const t = i / 12;
+        const ang = START + SWEEP * t;
+        ctx.strokeStyle = t >= 0.82 ? RED : "rgba(232,177,90,0.45)";
+        ctx.lineWidth = Math.max(1.2 * ratio, radius * 0.02);
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(ang) * radius * 0.86, cy + Math.sin(ang) * radius * 0.86);
+        ctx.lineTo(cx + Math.cos(ang) * radius * 0.93, cy + Math.sin(ang) * radius * 0.93);
+        ctx.stroke();
+      }
+      if (draw > 0.004) {
+        ctx.strokeStyle = lit;
+        ctx.lineWidth = Math.max(2.5 * ratio, radius * (satellite ? 0.055 : 0.07));
+        ctx.lineCap = "butt";
+        ctx.beginPath();
+        ctx.arc(cx, cy, bandR, START, START + SWEEP * draw, false);
+        ctx.stroke();
+      }
+      const ang = START + SWEEP * draw;
+      const reach = radius * (satellite ? 0.7 : 0.76);
+      const tail = radius * 0.12;
+      const cos = Math.cos(ang);
+      const sin = Math.sin(ang);
+      ctx.strokeStyle = WHITE;
+      ctx.lineWidth = Math.max(2 * ratio, radius * 0.028);
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(cx - cos * tail, cy - sin * tail);
+      ctx.lineTo(cx + cos * reach, cy + sin * reach);
+      ctx.stroke();
+      ctx.strokeStyle = lit;
+      ctx.lineWidth = Math.max(2.4 * ratio, radius * 0.038);
+      ctx.beginPath();
+      ctx.moveTo(cx + cos * reach * 0.72, cy + sin * reach * 0.72);
+      ctx.lineTo(cx + cos * reach, cy + sin * reach);
+      ctx.stroke();
+      ctx.fillStyle = WHITE;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius * 0.048, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#101010";
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius * 0.024, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = WHITE;
+      ctx.font = `700 ${radius * (satellite ? 0.26 : 0.34)}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(value || "—", cx, cy - radius * 0.04);
+      ctx.fillStyle = AMBER;
+      ctx.font = `500 ${radius * 0.11}px sans-serif`;
+      ctx.fillText(caption || "", cx, cy + radius * 0.18);
+    }
+
+    class Dial {
+      constructor(canvas) {
+        this.canvas = canvas;
+        this.satellite = canvas.dataset.satellite === "1";
+        this.shown = 0;
+        this.velocity = 0;
+        this.target = 0;
+        this.rising = true;
+        this.held = false;
+        this.value = "—";
+        this.caption = "";
+        this.last = 0;
+        this.frame = (now) => this.tick(now);
+        requestAnimationFrame(this.frame);
+      }
+      setReading(fraction, value, caption) {
+        const next = clamp(fraction || 0);
+        if (!this.held) {
+          this.shown = 0;
+          this.velocity = 0;
+          this.held = true;
+        }
+        const delta = next - this.shown;
+        this.rising = delta >= 0;
+        this.target = next;
+        if (Math.abs(delta) >= 0.003) this.velocity += delta * 6;
+        this.value = value;
+        this.caption = caption;
+      }
+      tick(now) {
+        const dt = this.last ? Math.min(0.05, (now - this.last) / 1000) : 0.016;
+        this.last = now;
+        const stiff = this.rising ? 340 : 72;
+        const damp = this.rising ? 13.5 : 8.5;
+        this.velocity += (stiff * (this.target - this.shown) - damp * this.velocity) * dt;
+        this.shown += this.velocity * dt;
+        if (Math.abs(this.target - this.shown) < 0.008 && Math.abs(this.velocity) < 0.03) {
+          this.shown = this.target;
+          this.velocity = 0;
+        }
+        paint(this.canvas, this.shown, this.value, this.caption, this.satellite);
+        requestAnimationFrame(this.frame);
+      }
+    }
+
+    const dials = {
+      cpu: new Dial(document.getElementById("cpu")),
+      temp: new Dial(document.getElementById("temp")),
+      ram: new Dial(document.getElementById("ram")),
+      store: new Dial(document.getElementById("store")),
+      link: new Dial(document.getElementById("link")),
+    };
+
+    function pct(value) { return `${Math.round(value)}%`; }
+    function rateLabel(bps) {
+      if (bps >= 1000000) return `${(bps / 1000000).toFixed(1)} MB/s`;
+      if (bps >= 1000) return `${Math.round(bps / 1000)} KB/s`;
+      return `${Math.round(bps)} B/s`;
+    }
+    function linkFraction(bps, connected) {
+      if (!connected) return 0;
+      if (bps <= 0) return 0.07;
+      return Math.max(0.07, Math.min(1, Math.log10(1 + bps) / Math.log10(1 + 1500000)));
+    }
+    function uptime(seconds) {
+      const minutes = Math.max(0, seconds) / 60;
+      if (minutes < 60) return `${Math.floor(minutes)}m`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 48) return `${hours}h ${Math.floor(minutes % 60)}m`;
+      return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+    }
+    function bytes(value) {
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let size = Number(value) || 0;
+      let index = 0;
+      while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1; }
+      const shown = size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1);
+      return `${shown} ${units[index]}`;
+    }
+    function storeOf(reading) {
+      const volumes = reading.volumes || [];
+      let used = 0;
+      let total = 0;
+      volumes.forEach((volume) => {
+        if (volume.count) { used += volume.used || 0; total += volume.total || 0; }
+      });
+      if (total <= 0 && reading.disk) { used = reading.disk.used || 0; total = reading.disk.total || 0; }
+      return { fraction: total ? used / total : 0, used, total };
+    }
+    function machinesOf(data) {
+      const listed = Array.isArray(data.machines) ? data.machines.filter(Boolean) : [];
+      if (listed.length) return listed.join(" · ");
+      if (data.phone_steps && data.phone_steps.length) return "phone";
+      if (data.confirm) return "confirm";
+      if (data.steps_run && data.steps_run.length) return data.steps_run.map((step) => step.device).filter(Boolean).join(" · ");
+      return "";
+    }
+    function stepLine(step) {
+      const mark = step.ok === false ? "failed" : "ok";
+      const hop = step.hop ? `hop ${step.hop} · ` : "";
+      const think = step.think ? ` · ${step.think}` : "";
+      return `${hop}${step.device || ""} ${step.tool || ""} · ${mark}${think}${step.message ? " · " + step.message : ""}`.trim();
+    }
+    function rows(host, pairs) {
+      host.replaceChildren();
+      pairs.forEach(([name, detail, fraction]) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        const label = document.createElement("span");
+        label.textContent = name;
+        const value = document.createElement("span");
+        value.className = "value";
+        value.textContent = detail;
+        row.append(label, value);
+        if (fraction != null) {
+          const track = document.createElement("div");
+          track.className = "track";
+          track.style.flexBasis = "100%";
+          const fill = document.createElement("div");
+          fill.className = "fill";
+          fill.style.width = `${Math.round(clamp(fraction) * 100)}%`;
+          track.appendChild(fill);
+          row.style.flexWrap = "wrap";
+          row.appendChild(track);
+        }
+        host.appendChild(row);
+      });
+    }
+
+    let status = null;
+    let lines = [];
+    let busy = false;
+    let page = "chat";
+    let target = "auto";
+
+    function renderStatus() {
+      const live = status || {};
+      const temp = Number(live.temp_c || 0);
+      const cpu = Number(live.cpu_pct || 0);
+      const mem = live.mem || {};
+      const memFrac = mem.total ? mem.used / mem.total : 0;
+      const store = storeOf(live);
+      const net = live.net || {};
+      const down = Number(net.rx_bps || 0);
+      const up = Number(net.tx_bps || 0);
+      const flow = down + up;
+      const link = linkFraction(flow, Boolean(status));
+      const load = live.load || [];
+      const hot = temp >= 80;
+      const presence = document.getElementById("presence");
+      presence.textContent = status ? (hot ? "Hot" : "Online") : "Away";
+      presence.className = "presence" + (status ? (hot ? " hot" : " here") : "");
+      dials.cpu.setReading(status ? cpu / 100 : 0, status ? pct(cpu) : "—", "CPU");
+      dials.temp.setReading(status ? clamp((temp - 40) / 60) : 0, status ? `${Math.round(temp)}°` : "—", "TEMP");
+      dials.ram.setReading(memFrac, status ? pct(memFrac * 100) : "—", "RAM");
+      dials.store.setReading(store.fraction, status ? pct(store.fraction * 100) : "—", "STORE");
+      dials.link.setReading(link, status ? (flow <= 0 ? "Idle" : rateLabel(flow)) : "—", "LINK");
+      const loadText = load.length >= 3 ? load.slice(0, 3).map((n) => Number(n).toFixed(2)).join("  ") : "—";
+      document.getElementById("strip").textContent = status
+        ? `Load ${loadText}\nUp ${uptime(live.uptime_s || 0)}   ·   ${live.cpu_mhz || 0} MHz   ·   Core ${Number(live.core_v || 0).toFixed(2)} V   ·   Supply ${live.supply || "—"}`
+        : "No reading";
+
+      const volumes = status ? (live.volumes || []) : [];
+      rows(document.getElementById("disk-list"), volumes.length ? volumes.map((volume) => {
+        const fraction = volume.total ? (volume.used || 0) / volume.total : 0;
+        const detail = volume.readable === false ? "unreadable" : `${bytes(volume.used)} / ${bytes(volume.total)}`;
+        return [volume.name || "Disk", detail, volume.readable === false ? null : fraction];
+      }) : [[status ? "No disks reported" : "No reading", "", null]]);
+
+      const flags = live.services || {};
+      const services = document.getElementById("services");
+      services.replaceChildren();
+      [["API", flags.api], ["Bridge", flags.bridge], ["Model", flags.ollama]].forEach(([name, on]) => {
+        const pill = document.createElement("span");
+        pill.className = "pill" + (status && on ? " on" : "");
+        pill.textContent = `${name} ${status ? (on ? "up" : "down") : "—"}`;
+        services.appendChild(pill);
+      });
+      const procs = (status ? (live.procs || []).slice(0, 6) : []).map((proc) => [proc.name || "process", `${Number(proc.cpu || 0).toFixed(1)}% CPU`, null]);
+      rows(document.getElementById("system-list"), [
+        ["Uptime", status ? uptime(live.uptime_s || 0) : "—", null],
+        ["Load", loadText, null],
+        ["Clock", status ? `${live.cpu_mhz || 0} MHz` : "—", null],
+        ["Core", status ? `${Number(live.core_v || 0).toFixed(2)} V` : "—", null],
+        ["Supply", status ? (live.supply || "—") : "—", null],
+        ["Memory", status ? `${bytes(mem.used)} / ${bytes(mem.total)}` : "—", null],
+        ...(procs.length ? procs : [["Processes", status ? "None reported" : "—", null]]),
+      ]);
+      const laptop = live.laptop || {};
+      rows(document.getElementById("laptop-list"), [
+        ["Worker", laptop.ok ? "Up" : (laptop.message || "Not connected"), null],
+        ["Last tool", ((live.agent || {}).steps_run || []).filter((step) => step.device === "laptop").map(stepLine).join(" / ") || "None yet", null],
+      ]);
+      const phone = live.phone || {};
+      const apps = (phone.apps || []).map((app) => app.name).filter(Boolean).join(", ");
+      rows(document.getElementById("phone-list"), [
+        ["Front", phone.front || "—", null],
+        ["Apps", apps || "—", null],
+        ["Last line", phone.last_utterance || "—", null],
+      ]);
+      const agent = live.agent || {};
+      const agentRows = [
+        ["Spoken", agent.spoken || "No run yet", null],
+        ["Machines", (agent.machines || []).join(" · ") || "—", null],
+      ];
+      (agent.steps_run || []).forEach((step, index) => {
+        agentRows.push([`Hop ${step.hop || index + 1}`, stepLine(step), null]);
+      });
+      rows(document.getElementById("agent-list"), agentRows);
+      rows(document.getElementById("settings-list"), [
+        ["Name", "Roxx", null],
+        ["Host", location.host, null],
+        ["Model", "Small Qwen on the home server", null],
+        ["Default target", target, null],
+        ["Readings", "Every 3 seconds", null],
+      ]);
+    }
+
+    function renderChat() {
+      const log = document.getElementById("log");
+      log.replaceChildren();
+      if (!lines.length) {
+        const hint = document.createElement("p");
+        hint.className = "hint";
+        hint.textContent = "Ask Marc, or tell it what to do on the laptop, the phone, or the server.";
+        log.appendChild(hint);
+      }
+      lines.forEach((line, index) => {
+        const row = document.createElement("div");
+        row.className = "line";
+        const text = document.createElement("div");
+        text.className = line.who === "you" ? "you" : "marc";
+        text.textContent = line.text;
+        row.appendChild(text);
+        if (line.machine) {
+          const machine = document.createElement("div");
+          machine.className = "machine";
+          machine.textContent = line.machine;
+          row.appendChild(machine);
+        }
+        (line.steps || []).forEach((step) => {
+          const item = document.createElement("div");
+          item.className = "steps" + (step.ok === false ? " step fail" : "");
+          item.textContent = stepLine(step);
+          row.appendChild(item);
+        });
+        if (line.confirm) {
+          const actions = document.createElement("div");
+          actions.className = "yesno";
+          ["Yes", "No"].forEach((label) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "send";
+            button.textContent = label;
+            button.addEventListener("click", () => answer(index, line.confirm.token, label === "Yes"));
+            actions.appendChild(button);
+          });
+          row.appendChild(actions);
+        }
+        log.appendChild(row);
+      });
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function show(next, push) {
+      page = PAGES[next] ? next : "chat";
+      document.querySelectorAll(".page").forEach((section) => {
+        section.classList.toggle("active", section.dataset.page === page);
+      });
+      document.querySelectorAll("[data-page]").forEach((link) => {
+        if (link.tagName === "BUTTON") return;
+        if (link.dataset.page === page) link.setAttribute("aria-current", "page");
+        else link.removeAttribute("aria-current");
+      });
+      document.getElementById("title").textContent = PAGES[page];
+      document.title = `Roxx · ${PAGES[page]}`;
+      const path = `/${page}`;
+      if (push && location.pathname !== path) history.pushState({ page }, "", path);
+    }
+
+    document.querySelectorAll("[data-page]").forEach((link) => {
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        show(link.dataset.page, true);
+      });
+    });
+    window.addEventListener("popstate", () => show(location.pathname.replace("/", "") || "chat", false));
+
+    document.querySelectorAll("[data-target]").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        target = chip.dataset.target;
+        document.querySelectorAll("[data-target]").forEach((item) => item.classList.toggle("on", item === chip));
+      });
+    });
+
+    async function tick() {
+      try {
+        const response = await fetch("/api/status", { cache: "no-store" });
+        if (response.ok) {
+          const data = await response.json();
+          if (data && data.cpu_pct != null) status = data;
+        }
+      } catch { /* keep the last reading */ }
+      renderStatus();
+      window.setTimeout(tick, 3000);
+    }
+
+    async function send(event) {
+      event.preventDefault();
+      const input = document.getElementById("text");
+      const said = input.value.trim();
+      if (!said || busy) return;
+      input.value = "";
+      busy = true;
+      document.getElementById("send").disabled = true;
+      lines = lines.concat([{ who: "you", text: said }, { who: "marc", text: "Thinking", machine: "" }]);
+      renderChat();
+      const path = ACTION.test(said) ? "/api/utterance" : "/api/chat";
+      try {
+        const response = await fetch(path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: said, target }),
+        });
+        const data = await response.json();
+        const failed = !response.ok || data.ok === false;
+        const spoken = data.spoken || (failed ? data.error || "I need a connection for that." : "Done.");
+        lines = lines.slice(0, -1).concat([{
+          who: "marc",
+          text: spoken,
+          machine: failed ? "" : machinesOf(data),
+          steps: data.steps_run || [],
+          confirm: data.confirm || null
+        }]);
+      } catch {
+        lines = lines.slice(0, -1).concat([{ who: "marc", text: "I need a connection for that.", machine: "" }]);
+      } finally {
+        busy = false;
+        document.getElementById("send").disabled = false;
+        renderChat();
+      }
+    }
+
+    async function answer(index, token, yes) {
+      const current = lines[index];
+      if (!current) return;
+      lines[index] = { ...current, confirm: null };
+      renderChat();
+      try {
+        const response = await fetch("/api/confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token, yes }),
+        });
+        const data = await response.json();
+        lines = lines.concat([{ who: "marc", text: data.spoken || "Done.", machine: machinesOf(data), steps: data.steps_run || [] }]);
+      } catch {
+        lines = lines.concat([{ who: "marc", text: "I need a connection for that.", machine: "" }]);
+      }
+      renderChat();
+    }
+
+    document.getElementById("composer").addEventListener("submit", send);
+    document.getElementById("send").addEventListener("click", send);
+    if (history.scrollRestoration) history.scrollRestoration = "manual";
+    if (location.pathname === "/" || location.pathname === "/index.html") history.replaceState({ page: "chat" }, "", "/chat");
+    show((location.pathname.split("/")[1]) || "chat", false);
+    renderStatus();
+    tick();
+  </script>
+</body>
+</html>

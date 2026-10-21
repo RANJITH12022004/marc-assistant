@@ -1,0 +1,41 @@
+.env
+.env.local
+.env.*
+!.env.example
+door/.env
+door/.env.local
+door/.vercel
+door/node_modules/
+door/.next/
+.cursor/
+.venv/
+__pycache__/
+*.pyc
+*.apk
+*.zip
+*.mp3
+*.wav
+.DS_Store
+
+# Secrets and local machine data
+data/logs/
+data/*token*
+data/*credentials*
+data/gmail_credentials.json
+data/google_credentials.json
+data/gmail_token.json
+data/google_token.json
+data/reminders.json
+data/datasets/**/*.jsonl
+
+# Weights and old copies
+laya_finetuned_marc_intent/
+laya_finetuned_marc_intent.zip
+MARC-!/
+
+# Local deploy helpers with private addresses
+_island/_*.py
+_island/*.apk
+
+# Notes that include private IPs
+marc mobile deployed till now.md

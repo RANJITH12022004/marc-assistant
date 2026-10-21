@@ -1,0 +1,29 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.marc.island"
+    compileSdk 34
+    buildToolsVersion "34.0.0"
+    defaultConfig {
+        applicationId "com.marc.island"
+        minSdk 26
+        targetSdk 34
+        versionCode 41
+        versionName "2.30"
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation "androidx.appcompat:appcompat:1.7.0"
+}
+
+configurations.configureEach {
+    exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk7"
+    exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk8"
+}

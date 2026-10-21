@@ -1,0 +1,19 @@
+{
+  "id": "ranjithd0212/marc-laya-rlcd-fine-tune-t4x2",
+  "id_no": 135491337,
+  "title": "Marc Laya RLCD Fine-tune T4x2",
+  "code_file": "marc-laya-rlcd-fine-tune-t4x2.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "machine_shape": "NvidiaTeslaT4",
+  "dataset_sources": [
+    "ranjithd0212/marc-intents-v3-rlcd"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

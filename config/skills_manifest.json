@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "assistant": "Marc",
+  "skills": [
+    {
+      "id": "open_close",
+      "title": "Open and close apps",
+      "description": "Open, focus, or close Windows apps including multi-app close with confirm."
+    },
+    {
+      "id": "multi_step",
+      "title": "Multi-step commands",
+      "description": "Chain actions with and/then, e.g. open browser, go to YouTube, search Samsung."
+    },
+    {
+      "id": "search",
+      "title": "Web and YouTube search",
+      "description": "Google or YouTube search; play first/second/third; next/previous video."
+    },
+    {
+      "id": "type",
+      "title": "Type text",
+      "description": "Type into the focused window, or click-then-type with a countdown."
+    },
+    {
+      "id": "whatsapp",
+      "title": "WhatsApp",
+      "description": "Message a contact or paste clipboard; confirms before send."
+    },
+    {
+      "id": "mail",
+      "title": "Gmail",
+      "description": "Search inbox, summarize unread, compose/send email after OAuth (main.py google-auth)."
+    },
+    {
+      "id": "calendar",
+      "title": "Google Calendar",
+      "description": "List upcoming events and create meetings after google-auth."
+    },
+    {
+      "id": "drive",
+      "title": "Google Drive",
+      "description": "Search Drive files by name or content."
+    },
+    {
+      "id": "maps",
+      "title": "Google Maps",
+      "description": "Search places and open directions (API key optional; browser fallback)."
+    },
+    {
+      "id": "hotkeys",
+      "title": "Hotkeys and volume",
+      "description": "Copy/paste, fullscreen, mute, volume, screenshots from spoken shortcuts."
+    },
+    {
+      "id": "camera",
+      "title": "Camera",
+      "description": "Open Camera, take photo, record, switch photo/video/barcode modes."
+    }
+  ],
+  "cannot": [
+    "Delete system files or format disks",
+    "Send email or WhatsApp without spoken confirm",
+    "Use Gmail/Calendar/Drive until you run google-auth"
+  ]
+}

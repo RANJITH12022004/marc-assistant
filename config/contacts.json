@@ -1,0 +1,20 @@
+{
+  "mom": {
+    "name": "Mom",
+    "whatsapp": "Mom",
+    "email": "",
+    "aliases": ["mummy", "amma"]
+  },
+  "alex": {
+    "name": "Alex",
+    "whatsapp": "Alex",
+    "email": "",
+    "aliases": ["alexander"]
+  },
+  "ranjith": {
+    "name": "Ranjith",
+    "whatsapp": "Ranjith",
+    "email": "",
+    "aliases": ["ranjith k"]
+  }
+}

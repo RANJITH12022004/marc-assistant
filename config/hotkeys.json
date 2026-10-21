@@ -1,0 +1,176 @@
+{
+  "copy": [
+    "ctrl",
+    "c"
+  ],
+  "paste": [
+    "ctrl",
+    "v"
+  ],
+  "cut": [
+    "ctrl",
+    "x"
+  ],
+  "undo": [
+    "ctrl",
+    "z"
+  ],
+  "redo": [
+    "ctrl",
+    "y"
+  ],
+  "save": [
+    "ctrl",
+    "s"
+  ],
+  "select all": [
+    "ctrl",
+    "a"
+  ],
+  "find": [
+    "ctrl",
+    "f"
+  ],
+  "new tab": [
+    "ctrl",
+    "t"
+  ],
+  "new window": [
+    "ctrl",
+    "n"
+  ],
+  "close tab": [
+    "ctrl",
+    "w"
+  ],
+  "refresh": [
+    "ctrl",
+    "r"
+  ],
+  "screenshot": [
+    "win",
+    "shift",
+    "s"
+  ],
+  "desktop": [
+    "win",
+    "d"
+  ],
+  "lock": [
+    "win",
+    "l"
+  ],
+  "task manager": [
+    "ctrl",
+    "shift",
+    "esc"
+  ],
+  "emoji": [
+    "win",
+    "."
+  ],
+  "camera_photo": [
+    "space"
+  ],
+  "camera_video": [
+    "space"
+  ],
+  "camera_video_mode": [
+    "tab"
+  ],
+  "fullscreen": [
+    "f11"
+  ],
+  "enter": [
+    "enter"
+  ],
+  "address bar": [
+    "ctrl",
+    "l"
+  ],
+  "maximize": [
+    "win",
+    "up"
+  ],
+  "minimize": [
+    "win",
+    "down"
+  ],
+  "snap left": [
+    "win",
+    "left"
+  ],
+  "snap right": [
+    "win",
+    "right"
+  ],
+  "task view": [
+    "win",
+    "tab"
+  ],
+  "new desktop": [
+    "win",
+    "ctrl",
+    "d"
+  ],
+  "close desktop": [
+    "win",
+    "ctrl",
+    "f4"
+  ],
+  "switch desktop left": [
+    "win",
+    "ctrl",
+    "left"
+  ],
+  "switch desktop right": [
+    "win",
+    "ctrl",
+    "right"
+  ],
+  "open explorer": [
+    "win",
+    "e"
+  ],
+  "open settings": [
+    "win",
+    "i"
+  ],
+  "run dialog": [
+    "win",
+    "r"
+  ],
+  "show desktop": [
+    "win",
+    "d"
+  ],
+  "mute": [
+    "volumemute"
+  ],
+  "unmute": [
+    "volumemute"
+  ],
+  "volume up": [
+    "volumeup"
+  ],
+  "volume down": [
+    "volumedown"
+  ],
+  "play pause": [
+    "playpause"
+  ],
+  "next track": [
+    "nexttrack"
+  ],
+  "previous track": [
+    "prevtrack"
+  ],
+  "close window": [
+    "alt",
+    "f4"
+  ],
+  "alt tab": [
+    "alt",
+    "tab"
+  ]
+}

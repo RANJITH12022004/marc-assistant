@@ -1,0 +1,17 @@
+{
+  "dataset": "marc_intents_v4",
+  "trained": false,
+  "note": "Run Colab/Kaggle RLCD on data/datasets/kaggle_bundle/marc_intents_v4_rlcd.jsonl, copy checkpoint to this folder, then set trained=true.",
+  "intents_added": [
+    "youtube_search",
+    "youtube_media",
+    "play_video",
+    "web_navigate",
+    "mail_search",
+    "mail_summarize",
+    "mail_compose",
+    "whatsapp_send",
+    "multi_step"
+  ],
+  "questions_added": ["needs_confirm", "is_multi_step"]
+}

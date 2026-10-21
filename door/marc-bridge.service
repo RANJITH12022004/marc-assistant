@@ -1,0 +1,15 @@
+[Unit]
+Description=Marc door bridge
+After=network-online.target marc-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=MARC_DOOR_URL=https://marc-door.vercel.app
+ExecStart=/usr/bin/python3 /home/rox/marc/marc_bridge.py
+Restart=always
+RestartSec=2
+User=rox
+
+[Install]
+WantedBy=multi-user.target

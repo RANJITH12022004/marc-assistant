@@ -1,0 +1,120 @@
+{
+  "openable_apps": [
+    "brave",
+    "calculator",
+    "camera",
+    "chrome",
+    "clock",
+    "cursor",
+    "edge",
+    "explorer",
+    "gmail",
+    "google",
+    "maps",
+    "notepad",
+    "onedrive",
+    "paint",
+    "photos",
+    "settings",
+    "snip",
+    "store",
+    "terminal",
+    "vlc",
+    "vscode",
+    "weather",
+    "youtube"
+  ],
+  "apps_missing_exe": [
+    "firefox",
+    "spotify",
+    "task manager"
+  ],
+  "app_count": 26,
+  "hotkey_count": 44,
+  "sites": [
+    "youtube",
+    "gmail",
+    "google"
+  ],
+  "site_actions": {
+    "youtube": [
+      "search",
+      "home_scrape",
+      "play_nth",
+      "play_title",
+      "pause"
+    ],
+    "google": [
+      "search",
+      "open_nth_result"
+    ],
+    "gmail": [
+      "open",
+      "search_ui"
+    ]
+  },
+  "camera_modes": [
+    "photo",
+    "video",
+    "barcode",
+    "record",
+    "stop"
+  ],
+  "raw_registry_matches": [
+    {
+      "name": "VLC media player",
+      "key": "vlc",
+      "exe": "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe"
+    },
+    {
+      "name": "Cursor",
+      "key": "cursor",
+      "exe": "C:\\Program Files\\cursor\\Cursor.exe"
+    },
+    {
+      "name": "Brave",
+      "key": "brave",
+      "exe": "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
+    },
+    {
+      "name": "Google Chrome",
+      "key": "chrome",
+      "exe": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+    },
+    {
+      "name": "Microsoft Edge",
+      "key": "edge",
+      "exe": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\153.0.4234.48\\msedge.exe"
+    },
+    {
+      "name": "Microsoft Edge WebView2 Runtime",
+      "key": "edge",
+      "exe": "C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\153.0.4234.48\\msedgewebview2.exe"
+    },
+    {
+      "name": "Microsoft OneDrive",
+      "key": "onedrive",
+      "exe": "C:\\Users\\ranjith\\AppData\\Local\\Microsoft\\OneDrive\\26.163.0823.0004\\OneDriveSetup.exe"
+    },
+    {
+      "name": "Microsoft Visual Studio Code (User)",
+      "key": "vscode",
+      "exe": "C:\\Users\\ranjith\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+    }
+  ],
+  "in_scope": [
+    "Open/close/focus inventoried apps",
+    "OS hotkeys (volume, snap, desktops, screenshot, emoji)",
+    "YouTube home feed + search + play Nth/title via Playwright",
+    "Google search + open first/Nth result via Playwright",
+    "Windows Camera photo/video/barcode/record (best-effort hotkeys)"
+  ],
+  "out_of_scope": [
+    "Arbitrary in-app UI clicks without vision",
+    "Reading Gmail message bodies without API",
+    "Installing/uninstalling software",
+    "Admin-only system changes",
+    "Brightness (hardware-dependent)"
+  ],
+  "notes": "Laya System-1 classifies coarse intents; per-app opens use open_app + apps.json. Fine-tune expands utterance coverage; runtime still needs apps/hotkeys configs."
+}

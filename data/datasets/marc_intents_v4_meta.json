@@ -1,0 +1,33 @@
+{
+  "dataset": "marc_intents_v4",
+  "intents": [
+    "open_app",
+    "close_app",
+    "focus_window",
+    "web_search",
+    "web_navigate",
+    "youtube_search",
+    "youtube_media",
+    "play_video",
+    "type_text",
+    "hotkey",
+    "file_find",
+    "file_open",
+    "system_status",
+    "volume_media",
+    "clipboard",
+    "settings",
+    "mail_search",
+    "mail_summarize",
+    "mail_compose",
+    "whatsapp_send",
+    "multi_step",
+    "clarify",
+    "chat",
+    "refuse"
+  ],
+  "train_rows": 4320,
+  "holdout_rows": 480,
+  "trained": false,
+  "note": "Finetune with Laya RLCD on marc_intents_v4_rlcd.jsonl; set trained true after ship."
+}

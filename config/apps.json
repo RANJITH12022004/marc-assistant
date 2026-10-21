@@ -1,0 +1,269 @@
+{
+  "chrome": {
+    "aliases": [
+      "google chrome",
+      "browser",
+      "googlechrome",
+      "web browser"
+    ],
+    "commands": [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+    ],
+    "shell": "chrome"
+  },
+  "brave": {
+    "aliases": [
+      "brave browser"
+    ],
+    "commands": [
+      "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+      "C:\\Users\\ranjith\\AppData\\Local\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
+    ],
+    "shell": "brave"
+  },
+  "edge": {
+    "aliases": [
+      "microsoft edge",
+      "msedge"
+    ],
+    "commands": [
+      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"
+    ],
+    "shell": "msedge"
+  },
+  "firefox": {
+    "aliases": [
+      "mozilla firefox"
+    ],
+    "commands": [
+      "C:\\Program Files\\Mozilla Firefox\\firefox.exe"
+    ],
+    "shell": "firefox"
+  },
+  "youtube": {
+    "aliases": [
+      "yt",
+      "you tube"
+    ],
+    "commands": [],
+    "url": "https://www.youtube.com"
+  },
+  "gmail": {
+    "aliases": [
+      "mail",
+      "email",
+      "inbox",
+      "google mail"
+    ],
+    "commands": [],
+    "url": "https://mail.google.com"
+  },
+  "camera": {
+    "aliases": [
+      "webcam",
+      "windows camera"
+    ],
+    "commands": [],
+    "shell": "start microsoft.windows.camera:"
+  },
+  "notepad": {
+    "aliases": [
+      "text editor",
+      "notes",
+      "note pad"
+    ],
+    "commands": [
+      "notepad.exe"
+    ],
+    "shell": "notepad"
+  },
+  "calculator": {
+    "aliases": [
+      "calc"
+    ],
+    "commands": [
+      "calc.exe"
+    ],
+    "shell": "calc"
+  },
+  "explorer": {
+    "aliases": [
+      "file explorer",
+      "files",
+      "folder"
+    ],
+    "commands": [
+      "explorer.exe"
+    ],
+    "shell": "explorer"
+  },
+  "vscode": {
+    "aliases": [
+      "vs code",
+      "code",
+      "visual studio code"
+    ],
+    "commands": [
+      "C:\\Users\\ranjith\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+    ],
+    "shell": "code"
+  },
+  "cursor": {
+    "aliases": [
+      "cursor ide",
+      "cursor editor"
+    ],
+    "commands": [
+      "C:\\Program Files\\cursor\\Cursor.exe",
+      "C:\\Users\\ranjith\\AppData\\Local\\Programs\\cursor\\Cursor.exe"
+    ],
+    "shell": "cursor"
+  },
+  "spotify": {
+    "aliases": [
+      "music"
+    ],
+    "commands": [
+      "C:\\Users\\ranjith\\AppData\\Roaming\\Spotify\\Spotify.exe"
+    ],
+    "shell": "spotify"
+  },
+  "whatsapp": {
+    "aliases": [
+      "whats app",
+      "whatsapp desktop",
+      "whatsup",
+      "what's up",
+      "wa"
+    ],
+    "commands": [
+      "C:\\Users\\ranjith\\AppData\\Local\\WhatsApp\\WhatsApp.exe",
+      "C:\\Program Files\\WindowsApps\\5319275A.WhatsAppDesktop_*/WhatsApp.exe"
+    ],
+    "shell": "start whatsapp:",
+    "url": "https://web.whatsapp.com"
+  },
+  "settings": {
+    "aliases": [
+      "windows settings",
+      "system settings"
+    ],
+    "commands": [
+      "ms-settings:"
+    ],
+    "shell": "start ms-settings:"
+  },
+  "terminal": {
+    "aliases": [
+      "powershell",
+      "cmd",
+      "command prompt",
+      "wt"
+    ],
+    "commands": [
+      "wt.exe",
+      "powershell.exe"
+    ],
+    "shell": "wt"
+  },
+  "paint": {
+    "aliases": [
+      "mspaint"
+    ],
+    "commands": [
+      "mspaint.exe"
+    ],
+    "shell": "mspaint"
+  },
+  "vlc": {
+    "aliases": [
+      "vlc media player",
+      "media player"
+    ],
+    "commands": [
+      "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe"
+    ],
+    "shell": "vlc"
+  },
+  "onedrive": {
+    "aliases": [
+      "one drive"
+    ],
+    "commands": [
+      "C:\\Users\\ranjith\\AppData\\Local\\Microsoft\\OneDrive\\OneDrive.exe"
+    ],
+    "shell": "onedrive"
+  },
+  "photos": {
+    "aliases": [
+      "windows photos",
+      "photo viewer",
+      "pictures"
+    ],
+    "commands": [],
+    "shell": "start ms-photos:"
+  },
+  "snip": {
+    "aliases": [
+      "snipping tool",
+      "snip and sketch",
+      "screen snip"
+    ],
+    "commands": [],
+    "shell": "start ms-screenclip:"
+  },
+  "store": {
+    "aliases": [
+      "microsoft store",
+      "windows store",
+      "app store"
+    ],
+    "commands": [],
+    "shell": "start ms-windows-store:"
+  },
+  "clock": {
+    "aliases": [
+      "alarms",
+      "timer",
+      "alarm clock"
+    ],
+    "commands": [],
+    "shell": "start ms-clock:"
+  },
+  "maps": {
+    "aliases": [
+      "windows maps",
+      "map"
+    ],
+    "commands": [],
+    "shell": "start bingmaps:"
+  },
+  "weather": {
+    "aliases": [
+      "weather app",
+      "forecast"
+    ],
+    "commands": [],
+    "url": "https://www.msn.com/en-us/weather"
+  },
+  "google": {
+    "aliases": [
+      "google search",
+      "google.com"
+    ],
+    "commands": [],
+    "url": "https://www.google.com"
+  },
+  "task manager": {
+    "aliases": [
+      "taskmgr",
+      "taskmanager"
+    ],
+    "commands": [
+      "taskmgr.exe"
+    ],
+    "shell": "taskmgr"
+  }
+}

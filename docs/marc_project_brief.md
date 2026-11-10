@@ -1,5 +1,7 @@
 # Marc laptop assistant — project brief
 
+> Superseded as the live product spec. See [marc_prd.md](marc_prd.md) for Marc as it runs today (phone, laptop, home server, Needle, mind, Office). This brief is the older laptop-only “hey Jarvis” path.
+
 Marc is a local Windows voice assistant that turns speech into laptop actions. The only neural piece that was fine-tuned is an intent classifier named Laya. The rest is rules, speech tools, and operating-system commands.
 
 The fruit-fly brain network is not in this project. It can sit beside Marc as a second decision system, but it does not replace the language model.

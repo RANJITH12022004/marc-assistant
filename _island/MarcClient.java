@@ -19,11 +19,14 @@ public final class MarcClient {
     private static final String PUBLIC_INBOX = "https://rox.tail9a2eac.ts.net/api/phone-inbox";
     private static final String PUBLIC_UTTER = "https://rox.tail9a2eac.ts.net/api/phone-utterance";
     private static final String PUBLIC_CHAT = "https://rox.tail9a2eac.ts.net/api/phone-chat";
+    private static final String PUBLIC_OFFICE = "https://rox.tail9a2eac.ts.net/api/phone-office";
+    private static final String PUBLIC_OFFICE_STATUS = "https://rox.tail9a2eac.ts.net/api/phone-office-status";
+    private static final String PUBLIC_OFFICE_CANCEL = "https://rox.tail9a2eac.ts.net/api/phone-office-cancel";
     private static final String[] LIVE = new String[]{
-            "http://192.168.68.109:8090",
+            "http://127.0.0.1:18090",
             "http://100.112.164.77:8090",
-            "http://127.0.0.1:8090",
-            "http://10.169.52.175:8090"
+            "http://192.168.68.109:8090",
+            "http://127.0.0.1:8090"
     };
     private final String token;
     private String home;
@@ -54,11 +57,61 @@ public final class MarcClient {
         return post("/chat", body);
     }
 
+    public JSONObject officeStatus() throws Exception {
+        return officeGet("/office", PUBLIC_OFFICE_STATUS);
+    }
+
+    public JSONObject officeSend(String text, boolean resume) throws Exception {
+        JSONObject body = new JSONObject();
+        body.put("session_id", "phone");
+        body.put("text", text == null ? "" : text);
+        body.put("resume", resume);
+        return officePost("/office", PUBLIC_OFFICE, body);
+    }
+
+    public JSONObject officeCancel() throws Exception {
+        return officePost("/office-cancel", PUBLIC_OFFICE_CANCEL, new JSONObject());
+    }
+
     public JSONObject confirm(String confirmToken, boolean yes) throws Exception {
         JSONObject body = new JSONObject();
         body.put("token", confirmToken);
         body.put("yes", yes);
         return post("/confirm", body);
+    }
+
+    /** Live run event log: heard → planning → steps → spoken. */
+    public JSONObject activity(long sinceMs) throws Exception {
+        Exception last = null;
+        String query = "/activity?session_id=phone&since=" + Math.max(0L, sinceMs);
+        String publicUrl = "https://rox.tail9a2eac.ts.net/api/phone-activity?session_id=phone&since="
+                + Math.max(0L, sinceMs);
+        if (preferPublic) {
+            try {
+                return getOk(publicUrl, 4000, 8000);
+            } catch (Exception exc) {
+                last = exc;
+                preferPublic = false;
+            }
+        }
+        for (String base : order()) {
+            try {
+                JSONObject body = getOk(base + query, 800, 2500);
+                home = base;
+                preferPublic = false;
+                return body;
+            } catch (Exception exc) {
+                last = exc;
+            }
+        }
+        try {
+            JSONObject body = getOk(publicUrl, 4000, 8000);
+            preferPublic = true;
+            return body;
+        } catch (Exception exc) {
+            last = exc;
+        }
+        throw last == null ? new Exception("Can't reach Marc") : last;
     }
 
     /** Gauges. Does not consume phone steps waiting for the desk. */
@@ -75,6 +128,8 @@ public final class MarcClient {
         Exception last = null;
         String path = take ? "/status?take=1" : "/status";
         String publicUrl = take ? PUBLIC_INBOX : PUBLIC_STATUS;
+        // Prefer a remembered home, then USB/LAN/Tailscale with short timeouts.
+        // Public HTTPS is slower and must not block the fast local path.
         if (preferPublic) {
             try {
                 return wrapPublic(publicUrl);
@@ -86,7 +141,7 @@ public final class MarcClient {
         for (String base : order()) {
             try {
                 long started = System.nanoTime();
-                JSONObject body = getOk(base + path, 1200, 4000);
+                JSONObject body = getOk(base + path, 400, 1200);
                 home = base;
                 preferPublic = false;
                 JSONObject wrap = new JSONObject();
@@ -107,18 +162,22 @@ public final class MarcClient {
         if (take) {
             throw last == null ? new Exception("Can't reach Marc") : last;
         }
-        long started = System.nanoTime();
-        JSONObject door = getOk(DOOR + "/v1/status", 2000, 4000);
-        door.put("rtt_ms", (System.nanoTime() - started) / 1_000_000L);
-        if (!door.has("status")) {
-            throw last == null ? new Exception("Can't reach Marc") : last;
+        try {
+            long started = System.nanoTime();
+            JSONObject door = getOk(DOOR + "/v1/status", 2000, 4000);
+            door.put("rtt_ms", (System.nanoTime() - started) / 1_000_000L);
+            if (door.has("status")) {
+                return door;
+            }
+        } catch (Exception exc) {
+            last = exc;
         }
-        return door;
+        throw last == null ? new Exception("Can't reach Marc") : last;
     }
 
     private JSONObject wrapPublic(String publicUrl) throws Exception {
         long started = System.nanoTime();
-        JSONObject body = getOk(publicUrl, 4000, 8000);
+        JSONObject body = getOk(publicUrl, 8000, 15000);
         preferPublic = true;
         JSONObject wrap = new JSONObject();
         wrap.put("ok", true);
@@ -135,7 +194,73 @@ public final class MarcClient {
         if ("/chat".equals(path)) {
             return PUBLIC_CHAT;
         }
+        if ("/office".equals(path)) {
+            return PUBLIC_OFFICE;
+        }
+        if ("/office-cancel".equals(path)) {
+            return PUBLIC_OFFICE_CANCEL;
+        }
         return null;
+    }
+
+    private JSONObject officeGet(String path, String publicUrl) throws Exception {
+        Exception last = null;
+        if (preferPublic) {
+            try {
+                return getOk(publicUrl, 4000, 8000);
+            } catch (Exception exc) {
+                last = exc;
+                preferPublic = false;
+            }
+        }
+        for (String base : order()) {
+            try {
+                JSONObject body = getOk(base + path, 1500, 8000);
+                home = base;
+                preferPublic = false;
+                return body;
+            } catch (Exception exc) {
+                last = exc;
+            }
+        }
+        try {
+            JSONObject body = getOk(publicUrl, 4000, 8000);
+            preferPublic = true;
+            return body;
+        } catch (Exception exc) {
+            last = exc;
+        }
+        throw last == null ? new Exception("Can't reach Marc") : last;
+    }
+
+    private JSONObject officePost(String path, String publicUrl, JSONObject body) throws Exception {
+        Exception last = null;
+        if (preferPublic) {
+            try {
+                return postOnce(publicUrl, body, 4000, 15000);
+            } catch (Exception exc) {
+                last = exc;
+                preferPublic = false;
+            }
+        }
+        for (String base : order()) {
+            try {
+                JSONObject response = postOnce(base + path, body, 1500, 15000);
+                home = base;
+                preferPublic = false;
+                return response;
+            } catch (Exception exc) {
+                last = exc;
+            }
+        }
+        try {
+            JSONObject response = postOnce(publicUrl, body, 4000, 15000);
+            preferPublic = true;
+            return response;
+        } catch (Exception exc) {
+            last = exc;
+        }
+        throw last == null ? new Exception("Can't reach Marc") : last;
     }
 
     private String[] order() {
@@ -158,7 +283,7 @@ public final class MarcClient {
         String publicUrl = publicTalk(path);
         if (preferPublic && publicUrl != null) {
             try {
-                JSONObject response = postOnce(publicUrl, body, 4000, 45000);
+                JSONObject response = postOnce(publicUrl, body, 4000, 90000);
                 if (useful(response)) {
                     return response;
                 }
@@ -169,7 +294,7 @@ public final class MarcClient {
         }
         for (String base : order()) {
             try {
-                JSONObject response = postOnce(base + path, body, 1500, 45000);
+                JSONObject response = postOnce(base + path, body, 1500, 90000);
                 if (useful(response)) {
                     home = base;
                     preferPublic = false;
@@ -182,7 +307,7 @@ public final class MarcClient {
         }
         if (publicUrl != null) {
             try {
-                JSONObject response = postOnce(publicUrl, body, 4000, 45000);
+                JSONObject response = postOnce(publicUrl, body, 4000, 90000);
                 if (useful(response)) {
                     preferPublic = true;
                     return response;

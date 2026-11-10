@@ -1,6 +1,7 @@
 package com.marc.island;
 
 import android.accessibilityservice.AccessibilityService;
+import android.app.KeyguardManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -14,6 +15,7 @@ import android.content.pm.ServiceInfo;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.annotation.SuppressLint;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -27,9 +29,11 @@ import android.speech.SpeechRecognizer;
 import android.media.AudioAttributes;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
+import android.telephony.PhoneStateListener;
+import android.telephony.TelephonyCallback;
+import android.telephony.TelephonyManager;
 import android.util.Log;
 import android.util.TypedValue;
-import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -44,9 +48,13 @@ import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import android.os.SystemClock;
+
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -60,10 +68,11 @@ import java.util.concurrent.TimeUnit;
 public class IslandService extends Service {
     static final String ACTION_LISTEN = "com.marc.island.LISTEN";
     static final String ACTION_ASK = "com.marc.island.ASK";
+    static final String ACTION_PLAY_WATER = "com.marc.island.PLAY_WATER";
     private static final String TAG = "MarcIsland";
-    /** Circle center from the display cutout path: M540,68.6 radius 21.5. */
-    private static final float CAMERA_X_PX = 540f;
-    private static final float CAMERA_Y_PX = 68.6f;
+    /** Circle center from the display cutout path: M540,68.6 radius 21.5 (device px). */
+    private static final float CAMERA_X_PX = IslandTouch.CAMERA_X;
+    private static final float CAMERA_Y_PX = IslandTouch.CAMERA_Y;
     private static final long HYDRATION_HOUR_MS = 60L * 60L * 1000L;
     private static final long HYDRATION_SNOOZE_MS = 15L * 60L * 1000L;
     private static final long HYDRATION_FIRST_MS = 8000L;
@@ -77,19 +86,23 @@ public class IslandService extends Service {
     private final BroadcastReceiver screenReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            ensurePill();
+            String action = intent == null ? null : intent.getAction();
+            // Lock screen wake: app overlays sit under the keyguard — promote to a11y.
+            if (Intent.ACTION_SCREEN_ON.equals(action) || Intent.ACTION_USER_PRESENT.equals(action)) {
+                ensurePillForLockScreen();
+            } else {
+                ensurePill();
+            }
             applyScreen();
-            if (intent != null && Intent.ACTION_USER_PRESENT.equals(intent.getAction()) && backdropView != null) {
+            if (Intent.ACTION_USER_PRESENT.equals(action) && backdropView != null) {
                 backdropView.showFace();
             }
-            if (intent != null && (Intent.ACTION_USER_PRESENT.equals(intent.getAction())
-                    || Intent.ACTION_SCREEN_ON.equals(intent.getAction()))) {
+            if (Intent.ACTION_USER_PRESENT.equals(action) || Intent.ACTION_SCREEN_ON.equals(action)) {
                 maybeHydration();
             }
-            if (intent != null && Intent.ACTION_SCREEN_OFF.equals(intent.getAction())
+            if (Intent.ACTION_SCREEN_OFF.equals(action)
                     && heroView != null && heroView.isPlaying()) {
-                heroView.stopQuiet();
-                dropHeroHit();
+                dropHero();
                 hydrationPending = true;
             }
         }
@@ -162,22 +175,43 @@ public class IslandService extends Service {
     private String confirmToken = "";
     private String chatTarget = "auto";
     private boolean listening;
+    private long listenStartedAt;
+    private final Runnable listenWatch = this::expireListen;
     private int listenGen;
     private boolean watchingScreen;
     private boolean hydrationPending;
     private boolean hydrationArmed;
     private final Runnable hydrationTick = this::maybeHydration;
+    private boolean pillLongFired;
+    private final Runnable pillLongPress = this::onPillLongPress;
+    /** True while cellular/VoIP call is ringing or active — pill stays visible, taps ignored. */
+    private boolean onCall;
+    private TelephonyManager telephony;
+    private Object callCallback;
+    @SuppressWarnings("deprecation")
+    private PhoneStateListener callListener;
     private static WeakReference<AccessibilityService> hostRef;
     private static WeakReference<IslandService> running;
 
     static void bindHost(AccessibilityService host) {
         hostRef = host == null ? null : new WeakReference<>(host);
-        if (host == null) {
-            IslandService service = running == null ? null : running.get();
-            if (service != null) {
-                service.mainHandler.post(service::dropPill);
-            }
+        IslandService service = running == null ? null : running.get();
+        if (service == null) {
+            return;
         }
+        if (host == null) {
+            service.mainHandler.post(service::dropPill);
+            return;
+        }
+        service.mainHandler.post(() -> {
+            if (MarcPresence.isAside(service)) {
+                return;
+            }
+            // Recreate on this same main-thread turn so nested ensurePill posts cannot
+            // race and fall back to APPLICATION_OVERLAY after a11y already won.
+            service.dropPill();
+            service.ensurePillNow();
+        });
     }
 
     @Override
@@ -258,10 +292,18 @@ public class IslandService extends Service {
             return START_STICKY;
         }
         ensurePill();
+        mainHandler.postDelayed(() -> {
+            if (!MarcPresence.isAside(this) && (pill == null || !pill.isAttachedToWindow())) {
+                ensurePill();
+            }
+        }, 800);
         watchScreen();
+        watchCalls();
         applyScreen();
         armHydration();
-        if (intent != null && ACTION_LISTEN.equals(intent.getAction())) {
+        if (intent != null && ACTION_PLAY_WATER.equals(intent.getAction())) {
+            playWaterNow();
+        } else if (intent != null && ACTION_LISTEN.equals(intent.getAction())) {
             startListening();
         } else if (intent != null && intent.hasExtra("text")) {
             if (intent.hasExtra("target")) {
@@ -303,12 +345,8 @@ public class IslandService extends Service {
     }
 
     private void dropPill() {
-        try {
-            if (windowManager != null && pill != null && pill.isAttachedToWindow()) {
-                windowManager.removeView(pill);
-            }
-        } catch (RuntimeException ignored) {
-        }
+        mainHandler.removeCallbacks(pillLongPress);
+        removeOverlayView(pill);
         dropHero();
         pill = null;
         backdropView = null;
@@ -318,6 +356,29 @@ public class IslandService extends Service {
         noView = null;
         iconRow = null;
         windowManager = null;
+    }
+
+    private void removeOverlayView(View view) {
+        if (view == null) {
+            return;
+        }
+        // Try every WindowManager that may own the pill so reconnects don't leave ghosts.
+        WindowManager[] managers = new WindowManager[]{
+                windowManager,
+                (WindowManager) getSystemService(WINDOW_SERVICE),
+                hostRef == null || hostRef.get() == null
+                        ? null
+                        : (WindowManager) hostRef.get().getSystemService(WINDOW_SERVICE),
+        };
+        for (WindowManager manager : managers) {
+            if (manager == null) {
+                continue;
+            }
+            try {
+                manager.removeViewImmediate(view);
+            } catch (RuntimeException ignored) {
+            }
+        }
     }
 
     private void dropHero() {
@@ -332,65 +393,112 @@ public class IslandService extends Service {
     }
 
     private void ensurePill() {
-        if (pill != null && !pill.isAttachedToWindow()) {
-            pill = null;
-        }
-        if (heroView != null && !heroView.isAttachedToWindow()) {
-            heroView = null;
-        }
-        showHeroStage();
-        showPill();
+        mainHandler.post(this::ensurePillNow);
     }
 
-    private void showPill() {
-        if (pill != null) {
+    /**
+     * Prefer TYPE_ACCESSIBILITY_OVERLAY (shows above the lock-screen keyguard).
+     * Must run on the main thread. Upgrades an existing app-overlay pill when a11y binds.
+     */
+    private void ensurePillNow() {
+        if (MarcPresence.isAside(this)) {
             return;
         }
-        AccessibilityService host = hostRef == null ? null : hostRef.get();
-        if (host == null) {
-            Log.i(TAG, "waiting for the accessibility host so the pill can sit above the status bar");
-            return;
+        boolean hostReady = hostRef != null && hostRef.get() != null;
+        if (pill != null && pill.getParent() != null) {
+            WindowManager.LayoutParams params =
+                    (WindowManager.LayoutParams) pill.getLayoutParams();
+            boolean appOverlay = params != null
+                    && params.type == WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+            if (!(hostReady && appOverlay)) {
+                return;
+            }
+            // Stuck under the keyguard as SYSTEM_ALERT_WINDOW — promote to a11y.
+            dropPill();
+        } else {
+            dropPill();
         }
-        windowManager = (WindowManager) host.getSystemService(WINDOW_SERVICE);
-        showHeroStage();
+        // Trust addOverlay's result — isAttachedToWindow() can lag false on a11y overlays
+        // and was causing an immediate fallback to APPLICATION_OVERLAY (hidden on lock).
+        if (!showPill(true)) {
+            showPill(false);
+        }
+    }
+
+    /** Wake / lock-screen path: same as ensurePill, then re-apply visibility flags. */
+    private void ensurePillForLockScreen() {
+        mainHandler.post(() -> {
+            ensurePillNow();
+            if (pill != null && pill.getParent() != null) {
+                applyScreen();
+            }
+        });
+    }
+
+    private boolean showPill() {
+        return showPill(hostRef != null && hostRef.get() != null);
+    }
+
+    private boolean showPill(boolean preferA11y) {
+        if (pill != null && pill.getParent() != null) {
+            return true;
+        }
+        dropPill();
+        AccessibilityService host = preferA11y && hostRef != null ? hostRef.get() : null;
+        // View context MUST match the WindowManager owner or Android throws BadTokenException.
+        Context overlayCtx = host != null ? host : this;
+        windowManager = (WindowManager) overlayCtx.getSystemService(WINDOW_SERVICE);
+        if (windowManager == null) {
+            Log.e(TAG, "no window manager for pill");
+            return false;
+        }
         int height = dp(38);
-        pill = new FrameLayout(this);
+        int slop = dp(IslandTouch.HIT_SLOP_DP);
+        int extraBelow = dp(IslandTouch.HIT_BELOW_DP);
+        pill = new FrameLayout(overlayCtx);
+        pill.setClickable(true);
+        pill.setFocusable(false);
+        pill.setClipToPadding(false);
+        pill.setClipChildren(false);
+        pill.setPadding(slop, 0, slop, extraBelow);
 
-        backdropView = new IslandBackdropView(this);
-        pill.addView(backdropView, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        backdropView = new IslandBackdropView(overlayCtx);
+        FrameLayout.LayoutParams backdropLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, height, Gravity.TOP);
+        pill.addView(backdropView, backdropLp);
 
-        LinearLayout row = new LinearLayout(this);
+        LinearLayout row = new LinearLayout(overlayCtx);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        pill.addView(row, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        FrameLayout.LayoutParams rowLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, height, Gravity.TOP);
+        pill.addView(row, rowLp);
 
-        iconRow = new LinearLayout(this);
+        iconRow = new LinearLayout(overlayCtx);
         iconRow.setOrientation(LinearLayout.HORIZONTAL);
         iconRow.setGravity(Gravity.CENTER_VERTICAL);
         row.addView(iconRow, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT));
 
-        View hole = new View(this);
+        View hole = new View(overlayCtx);
         row.addView(hole, new LinearLayout.LayoutParams(dp(26), 1));
 
-        waveView = new IslandWaveView(this);
+        waveView = new IslandWaveView(overlayCtx);
         waveView.setVisibility(View.GONE);
         LinearLayout.LayoutParams waveLp = new LinearLayout.LayoutParams(dp(24), dp(18));
         waveLp.leftMargin = dp(2);
         waveLp.rightMargin = dp(2);
         row.addView(waveView, waveLp);
 
-        lineView = label("");
+        lineView = label(overlayCtx, "");
         lineView.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
         lineView.setMaxWidth(dp(92));
         lineView.setPadding(dp(2), 0, dp(8), 0);
         row.addView(lineView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT));
 
-        yesView = chipLabel("Yes", 0x3330D158, 0xFF30D158);
-        noView = chipLabel("No", 0x33FF453A, 0xFFFF453A);
+        yesView = chipLabel(overlayCtx, "Yes", 0x3330D158, 0xFF30D158);
+        noView = chipLabel(overlayCtx, "No", 0x33FF453A, 0xFFFF453A);
         yesView.setVisibility(View.GONE);
         noView.setVisibility(View.GONE);
         LinearLayout.LayoutParams yesLp = new LinearLayout.LayoutParams(
@@ -404,52 +512,50 @@ public class IslandService extends Service {
         yesView.setOnClickListener(v -> sendConfirm(true));
         noView.setOnClickListener(v -> sendConfirm(false));
 
-        GestureDetector gestures = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
-            @Override
-            public boolean onDown(MotionEvent event) {
-                return confirmToken.isEmpty() && !listening;
+        // Touch only on the drawn capsule (backdrop + row), not empty padding under/beside it.
+        View.OnTouchListener islandHit = this::onPillTouch;
+        backdropView.setOnTouchListener(islandHit);
+        row.setOnTouchListener(islandHit);
+        pill.setOnTouchListener((v, event) -> {
+            if (event.getY() > height) {
+                return false;
             }
-
-            @Override
-            public boolean onSingleTapUp(MotionEvent event) {
-                if (!confirmToken.isEmpty() || listening) {
-                    return true;
-                }
-                startListening();
-                return true;
-            }
-
-            @Override
-            public void onLongPress(MotionEvent event) {
-                if (!confirmToken.isEmpty() || listening) {
-                    return;
-                }
-                openChat();
-            }
-        });
-        pill.setOnTouchListener((view, event) -> {
-            int action = event.getActionMasked();
-            if (action == MotionEvent.ACTION_DOWN) {
-                view.animate()
-                        .scaleX(0.93f)
-                        .scaleY(0.93f)
-                        .setDuration(80)
-                        .setInterpolator(new DecelerateInterpolator())
-                        .start();
-            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                view.animate()
-                        .scaleX(1f)
-                        .scaleY(1f)
-                        .setDuration(220)
-                        .setInterpolator(new OvershootInterpolator(2.2f))
-                        .start();
-            }
-            return gestures.onTouchEvent(event);
+            return onPillTouch(v, event);
         });
 
-        int type = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY;
+        WindowManager.LayoutParams params = buildPillParams(
+                host != null,
+                dp(112) + slop * 2,
+                height + extraBelow,
+                Math.max(0, Math.round(CAMERA_X_PX - dp(112) / 2f - slop)),
+                Math.max(0, Math.round(CAMERA_Y_PX - height / 2f)));
+        if (!addOverlay(pill, params)) {
+            removeOverlayView(pill);
+            pill = null;
+            backdropView = null;
+            waveView = null;
+            lineView = null;
+            yesView = null;
+            noView = null;
+            iconRow = null;
+            windowManager = null;
+            return false;
+        }
+        pill.setPivotX(slop + dp(112) / 2f);
+        pill.setPivotY(height / 2f);
+        setLine("");
+        Log.i(TAG, "pill live y=" + params.y + " h=" + params.height
+                + " cameraY=" + CAMERA_Y_PX + " type=" + params.type
+                + " a11y=" + (host != null));
+        return true;
+    }
+
+    private WindowManager.LayoutParams buildPillParams(boolean a11y, int width, int height, int x, int y) {
+        int type = a11y
+                ? WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                : WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
         WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                dp(112),
+                width,
                 height,
                 type,
                 windowFlags(true),
@@ -460,20 +566,18 @@ public class IslandService extends Service {
             params.setFitInsetsTypes(0);
             params.setFitInsetsIgnoringVisibility(true);
         }
-        params.x = Math.max(0, Math.round(CAMERA_X_PX - dp(112) / 2f));
-        params.y = Math.max(0, Math.round(CAMERA_Y_PX - height / 2f));
-        windowManager.addView(pill, params);
-        setLine("");
-        Log.i(TAG, "pill y=" + params.y + " h=" + height + " cameraY=" + CAMERA_Y_PX);
+        params.x = x;
+        params.y = y;
+        return params;
     }
 
     private void showHeroStage() {
         AccessibilityService host = hostRef == null ? null : hostRef.get();
-        if (host == null) {
-            return;
+        if (windowManager == null) {
+            windowManager = (WindowManager) (host != null ? host : this).getSystemService(WINDOW_SERVICE);
         }
         if (windowManager == null) {
-            windowManager = (WindowManager) host.getSystemService(WINDOW_SERVICE);
+            return;
         }
         if (heroView != null && heroView.isAttachedToWindow()) {
             return;
@@ -497,6 +601,7 @@ public class IslandService extends Service {
             @Override
             public void onFinished(boolean drank) {
                 dropHeroHit();
+                mainHandler.post(() -> dropHero());
                 SharedPreferences prefs = hydrationPrefs();
                 long now = System.currentTimeMillis();
                 long wait = drank ? HYDRATION_HOUR_MS : HYDRATION_SNOOZE_MS;
@@ -510,7 +615,9 @@ public class IslandService extends Service {
                 Log.i(TAG, "hydration done drank=" + drank);
             }
         });
-        int type = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY;
+        int type = host != null
+                ? WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                : WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
         WindowManager.LayoutParams params = new WindowManager.LayoutParams(
                 getResources().getDisplayMetrics().widthPixels,
                 dp(380),
@@ -525,7 +632,11 @@ public class IslandService extends Service {
         }
         params.x = 0;
         params.y = 0;
-        windowManager.addView(heroView, params);
+        if (!addOverlay(heroView, params)) {
+            heroView = null;
+            return;
+        }
+        raisePill();
     }
 
     private void showHeroHit() {
@@ -539,12 +650,19 @@ public class IslandService extends Service {
                 heroView.acceptDrink();
             }
         });
-        int w = dp(120);
-        int h = dp(180);
+        AccessibilityService host = hostRef == null ? null : hostRef.get();
+        int type = host != null
+                ? WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                : WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+        // Sit clearly under the island so drink taps never steal the camera-hole hit box.
+        int w = dp(160);
+        int h = dp(200);
+        int visualH = dp(38);
+        int below = dp(IslandTouch.HIT_BELOW_DP);
         WindowManager.LayoutParams params = new WindowManager.LayoutParams(
                 w,
                 h,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                type,
                 windowFlags(true),
                 PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START;
@@ -553,9 +671,11 @@ public class IslandService extends Service {
             params.setFitInsetsTypes(0);
             params.setFitInsetsIgnoringVisibility(true);
         }
-        params.x = Math.max(0, Math.round(CAMERA_X_PX + dp(18) - w / 2f));
-        params.y = Math.max(0, Math.round(CAMERA_Y_PX + dp(70)));
-        windowManager.addView(heroHit, params);
+        params.x = Math.max(0, Math.round(CAMERA_X_PX - w / 2f));
+        params.y = Math.max(0, Math.round(CAMERA_Y_PX + visualH / 2f + below + dp(8)));
+        if (!addOverlay(heroHit, params)) {
+            heroHit = null;
+        }
     }
 
     private void dropHeroHit() {
@@ -578,16 +698,13 @@ public class IslandService extends Service {
         }
         SharedPreferences prefs = hydrationPrefs();
         boolean seen = prefs.getBoolean("seen", false);
-        if (!seen) {
-            armHydrationIn(HYDRATION_FIRST_MS);
-            return;
-        }
         long now = System.currentTimeMillis();
-        long next = prefs.getLong("next", 0);
-        if (next <= 0) {
-            next = prefs.getLong("last", 0) + HYDRATION_HOUR_MS;
+        long last = prefs.getLong("last", 0);
+        long delay = BeeOverlay.nextDelayMs(seen, last, now);
+        if (delay <= 0L) {
+            delay = 1000L;
         }
-        armHydrationIn(Math.max(1000L, next - now));
+        armHydrationIn(delay);
     }
 
     private void armHydrationIn(long delayMs) {
@@ -617,16 +734,23 @@ public class IslandService extends Service {
         boolean seen = prefs.getBoolean("seen", false);
         long last = prefs.getLong("last", 0);
         long now = System.currentTimeMillis();
-        boolean due = hydrationPending || !seen || now - last >= HYDRATION_HOUR_MS;
-        if (!due) {
-            armHydrationIn(last + HYDRATION_HOUR_MS - now);
+        long delay = BeeOverlay.nextDelayMs(seen, last, now);
+        if (!hydrationPending && delay > 0L) {
+            armHydrationIn(delay);
             return;
         }
         playHydration();
     }
 
+    private void playWaterNow() {
+        ensurePill();
+        playHydration();
+    }
+
     private void playHydration() {
         ensurePill();
+        showHeroStage();
+        raisePill();
         if (heroView == null) {
             armHydrationIn(15_000L);
             return;
@@ -660,13 +784,170 @@ public class IslandService extends Service {
         startActivity(intent);
     }
 
+    private boolean onPillTouch(View view, MotionEvent event) {
+        if (onCall) {
+            // Stay visible during calls, but never steal taps from the dialer.
+            return false;
+        }
+        // Map hits to the drawn island only (38dp capsule). Ignore invisible padding.
+        int visualH = dp(38);
+        float localY = event.getY();
+        if (view != pill && pill != null) {
+            // Child coordinates → pill-local for the visual-band check.
+            localY = event.getY() + view.getTop();
+        }
+        if (localY < 0 || localY > visualH) {
+            mainHandler.removeCallbacks(pillLongPress);
+            return false;
+        }
+        if (touchOnChip(yesView, event) || touchOnChip(noView, event)) {
+            mainHandler.removeCallbacks(pillLongPress);
+            return false;
+        }
+        int action = event.getActionMasked();
+        View animateTarget = pill != null ? pill : view;
+        if (action == MotionEvent.ACTION_DOWN) {
+            IslandTouch.onDown(listening, !confirmToken.isEmpty());
+            pillLongFired = false;
+            mainHandler.removeCallbacks(pillLongPress);
+            mainHandler.postDelayed(pillLongPress, IslandTouch.LONG_PRESS_MS);
+            animateTarget.animate().cancel();
+            animateTarget.animate()
+                    .scaleX(0.93f)
+                    .scaleY(0.93f)
+                    .setDuration(80)
+                    .setInterpolator(new DecelerateInterpolator())
+                    .start();
+            return true;
+        }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            mainHandler.removeCallbacks(pillLongPress);
+            animateTarget.animate().cancel();
+            animateTarget.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .setDuration(220)
+                    .setInterpolator(new OvershootInterpolator(2.2f))
+                    .start();
+            if (action == MotionEvent.ACTION_UP && !pillLongFired) {
+                onPillTap();
+            }
+            return true;
+        }
+        return true;
+    }
+
+    private void onPillTap() {
+        long age = listening ? SystemClock.uptimeMillis() - listenStartedAt : 0L;
+        String action = IslandTouch.onTap(listening, !confirmToken.isEmpty(), age);
+        Log.i(TAG, "pill tap " + action);
+        if ("cancel".equals(action)) {
+            sendConfirm(false);
+            return;
+        }
+        if ("ignore".equals(action)) {
+            return;
+        }
+        if ("stop_listen".equals(action)) {
+            listening = false;
+            mainHandler.removeCallbacks(listenWatch);
+            releaseRecognizer();
+            if (waveView != null) {
+                waveView.setMode(false, false);
+            }
+            if (backdropView != null) {
+                backdropView.setState(IslandBackdropView.STATE_IDLE);
+            }
+            setLine("", false);
+            setPhase("Idle");
+            return;
+        }
+        if ("restart_listen".equals(action)) {
+            releaseRecognizer();
+            listening = false;
+        }
+        startListening();
+    }
+
+    private void onPillLongPress() {
+        pillLongFired = true;
+        if (pill != null) {
+            pill.animate().cancel();
+            pill.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .setDuration(180)
+                    .setInterpolator(new OvershootInterpolator(2.2f))
+                    .start();
+        }
+        String action = IslandTouch.onLongPress(listening, !confirmToken.isEmpty());
+        Log.i(TAG, "pill long-press " + action);
+        if ("open_app".equals(action)) {
+            openChat();
+        }
+    }
+
+    private boolean touchOnChip(View chip, MotionEvent event) {
+        if (chip == null || chip.getVisibility() != View.VISIBLE || pill == null) {
+            return false;
+        }
+        int[] pillLoc = new int[2];
+        int[] chipLoc = new int[2];
+        pill.getLocationOnScreen(pillLoc);
+        chip.getLocationOnScreen(chipLoc);
+        float x = event.getRawX();
+        float y = event.getRawY();
+        return x >= chipLoc[0] && x < chipLoc[0] + chip.getWidth()
+                && y >= chipLoc[1] && y < chipLoc[1] + chip.getHeight();
+    }
+
+    private void raisePill() {
+        if (windowManager == null || pill == null || !pill.isAttachedToWindow()) {
+            return;
+        }
+        WindowManager.LayoutParams params = (WindowManager.LayoutParams) pill.getLayoutParams();
+        params.flags = windowFlags(screenLit());
+        try {
+            windowManager.removeView(pill);
+            windowManager.addView(pill, params);
+        } catch (RuntimeException exc) {
+            Log.w(TAG, "raise pill", exc);
+            try {
+                windowManager.updateViewLayout(pill, params);
+            } catch (RuntimeException ignored) {
+            }
+        }
+    }
+
     private void startListening() {
         startListening(false);
+    }
+
+    private void expireListen() {
+        if (!listening) {
+            return;
+        }
+        if (SystemClock.uptimeMillis() - listenStartedAt < IslandTouch.LISTEN_TIMEOUT_MS) {
+            return;
+        }
+        listening = false;
+        releaseRecognizer();
+        if (waveView != null) {
+            waveView.setMode(false, false);
+        }
+        if (backdropView != null) {
+            backdropView.setState(IslandBackdropView.STATE_IDLE);
+        }
+        setLine(BeeAsk.lineFor("fail"));
+        setPhase("Idle");
     }
 
     private void startListening(boolean retried) {
         final int gen = ++listenGen;
         listening = true;
+        listenStartedAt = SystemClock.uptimeMillis();
+        mainHandler.removeCallbacks(listenWatch);
+        mainHandler.postDelayed(listenWatch, IslandTouch.LISTEN_TIMEOUT_MS);
         setPhase("Listening");
         if (!retried && tts != null) {
             tts.stop();
@@ -677,7 +958,7 @@ public class IslandService extends Service {
         if (waveView != null) {
             waveView.setMode(true, false);
         }
-        setLine("Listening");
+        setLine(BeeAsk.lineFor("listen"), false);
         Log.i(TAG, "listen-start gen=" + gen + " retry=" + retried);
         if (recognizer == null) {
             recognizer = SpeechRecognizer.createSpeechRecognizer(this);
@@ -716,33 +997,104 @@ public class IslandService extends Service {
             setPhase("Idle");
             return;
         }
-        setPhase("Thinking");
         String said = typed ? text.trim() : HearFix.correct(this, text.trim());
-        ChatStore.add(this, true, said);
-        setLine(said);
-        Log.i(TAG, "utterance " + text.trim() + " -> " + said);
-        boolean skipLocal = "laptop".equals(chatTarget) || "server".equals(chatTarget)
-                || namedLaptop(said) || namedServer(said);
-        if (!skipLocal) {
-            String local = PhoneControls.handle(this, said);
-            if (local != null) {
-                if (waveView != null) {
-                    waveView.setMode(false, false);
-                }
-                if (backdropView != null) {
-                    backdropView.setState(IslandBackdropView.STATE_ACTING);
-                }
-                ChatStore.add(this, false, local);
-                say(local);
-                setLine(local);
+        String voice = BeeAsk.classifyVoice(said);
+        if ("refuse".equals(voice)) {
+            ChatStore.add(this, false, "No.");
+            setLine(BeeAsk.lineFor("fail"));
+            setPhase("Idle");
+            return;
+        }
+        if (!confirmToken.isEmpty()) {
+            if ("confirm".equals(voice)) {
+                sendConfirm(true);
                 return;
             }
+            if ("cancel".equals(voice)) {
+                sendConfirm(false);
+                return;
+            }
+        }
+        setPhase("Thinking");
+        setLine(BeeAsk.lineFor("plan"), false);
+        ChatStore.add(this, true, said);
+        ActivityStore.heard(this, said);
+        Log.i(TAG, "utterance " + text.trim() + " -> " + said);
+
+        // Named device or Chat target always goes to Marc API.
+        String target = resolveTarget(said);
+        if (!"auto".equals(target) && !"phone".equals(target)) {
+            askMarc(said, target);
+            return;
+        }
+
+        Map<String, Object> planned = BeeAsk.planAsk(said);
+        String kind = String.valueOf(planned.get("kind"));
+        if ("local_fast".equals(kind) || BeeAsk.skipMuse(said)) {
             LocalMarc.Plan localPlan = LocalMarc.plan(said);
             if (localPlan != null) {
+                ActivityStore.localPlan(this, "LocalMarc", localPlan.spoken, localPlan.steps);
                 actLocal(localPlan);
                 return;
             }
         }
+        if ("dag".equals(kind) && !dagNeedsRemote(planned)) {
+            runBeeDag(planned);
+            return;
+        }
+        askMarc(said, target);
+    }
+
+    private String resolveTarget(String said) {
+        if (namedLaptop(said)) {
+            return "laptop";
+        }
+        if (namedServer(said)) {
+            return "server";
+        }
+        if (chatTarget != null && !chatTarget.isEmpty() && !"auto".equals(chatTarget)) {
+            return chatTarget;
+        }
+        return "auto";
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean dagNeedsRemote(Map<String, Object> planned) {
+        List<Map<String, Object>> steps = (List<Map<String, Object>>) planned.get("steps");
+        if (steps == null) {
+            return false;
+        }
+        for (Map<String, Object> step : steps) {
+            String device = String.valueOf(step.get("device"));
+            if ("laptop".equals(device) || "server".equals(device)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void runBeeDag(Map<String, Object> planned) {
+        List<Map<String, Object>> steps = (List<Map<String, Object>>) planned.get("steps");
+        JSONArray phone = new JSONArray();
+        if (steps != null) {
+            for (Map<String, Object> step : steps) {
+                String device = String.valueOf(step.get("device"));
+                if ("laptop".equals(device) || "server".equals(device)) {
+                    continue;
+                }
+                phone.put(toPhoneStep(step));
+            }
+        }
+        String spoken = phone.length() <= 1
+                ? "On it."
+                : "On it — " + phone.length() + " steps queued.";
+        ActivityStore.localPlan(this, "BeeAsk", spoken, phone);
+        setLine(BeeAsk.clampLine(spoken));
+        actLocal(new LocalMarc.Plan(spoken, phone, false, false));
+    }
+
+    private void askMarc(String said, String target) {
         if (backdropView != null) {
             backdropView.setState(IslandBackdropView.STATE_THINKING);
         }
@@ -750,13 +1102,17 @@ public class IslandService extends Service {
             waveView.setMode(true, true);
         }
         fitPill(said);
+        ActivityStore.planning(this, "hermes", target);
+        final String dest = target == null || target.isEmpty() ? "auto" : target;
         io.execute(() -> {
             try {
-                JSONObject response = client.utterance(said, chatTarget);
+                JSONObject response = client.utterance(said, dest);
+                ActivityStore.fromResponse(this, response);
                 runMain(() -> show(response));
             } catch (Exception exc) {
-                Log.e(TAG, "utterance failed", exc);
+                Log.e(TAG, "marc utterance failed", exc);
                 String message = connectionLine(exc.getMessage());
+                ActivityStore.fail(this, message);
                 runMain(() -> {
                     if (waveView != null) {
                         waveView.setMode(false, false);
@@ -765,17 +1121,50 @@ public class IslandService extends Service {
                         backdropView.setState(IslandBackdropView.STATE_ERROR);
                     }
                     ChatStore.add(this, false, message);
-                    setLine(message);
+                    setLine(BeeAsk.clampLine(message));
                     say(message);
+                    setPhase("Idle");
                 });
             }
         });
     }
 
+    private JSONObject toPhoneStep(Map<String, Object> step) {
+        JSONObject out = new JSONObject();
+        try {
+            String tool = String.valueOf(step.get("tool"));
+            if ("music_play".equals(tool)) {
+                tool = "play_music";
+            } else if ("phone_dial".equals(tool)) {
+                tool = "dial";
+            } else if ("app_open".equals(tool)) {
+                tool = "open_app";
+            }
+            out.put("tool", tool);
+            JSONObject args = new JSONObject();
+            Object raw = step.get("args");
+            if (raw instanceof Map) {
+                Map<?, ?> map = (Map<?, ?>) raw;
+                for (Map.Entry<?, ?> e : map.entrySet()) {
+                    args.put(String.valueOf(e.getKey()), e.getValue() == null ? "" : String.valueOf(e.getValue()));
+                }
+            }
+            if (args.has("to") && !args.has("contact")) {
+                args.put("contact", args.optString("to"));
+            }
+            if (args.has("app") && !args.has("name")) {
+                args.put("name", args.optString("app"));
+            }
+            out.put("args", args);
+        } catch (Exception ignored) {
+        }
+        return out;
+    }
+
     private void show(JSONObject response) {
         if (heroView != null && heroView.isPlaying()) {
-            heroView.stopQuiet();
             dropHeroHit();
+            mainHandler.post(this::dropHero);
             hydrationPending = true;
             armHydrationIn(30_000L);
         }
@@ -971,6 +1360,11 @@ public class IslandService extends Service {
         if (listener != null) {
             mainHandler.post(() -> listener.onPhase(next));
         }
+        if ("Listening".equals(next) && lineView != null) {
+            setLine(BeeAsk.lineFor("listen"), false);
+        } else if ("Thinking".equals(next) && lineView != null) {
+            setLine(BeeAsk.lineFor("plan"), false);
+        }
     }
 
     private static String connectionLine(String message) {
@@ -1063,17 +1457,25 @@ public class IslandService extends Service {
         width = Math.min(dp(256), width);
 
         WindowManager.LayoutParams params = (WindowManager.LayoutParams) pill.getLayoutParams();
-        int x = Math.max(0, Math.round(CAMERA_X_PX - holeCenter));
+        int slop = dp(IslandTouch.HIT_SLOP_DP);
+        int extraBelow = dp(IslandTouch.HIT_BELOW_DP);
+        int visualH = dp(38);
+        int winW = width + slop * 2;
+        int winH = visualH + extraBelow;
+        int x = Math.max(0, Math.round(CAMERA_X_PX - holeCenter - slop));
+        int y = Math.max(0, Math.round(CAMERA_Y_PX - visualH / 2f));
         int prevW = params.width;
-        boolean changed = params.width != width || params.x != x;
-        params.width = width;
+        boolean changed = params.width != winW || params.x != x || params.height != winH || params.y != y;
+        params.width = winW;
+        params.height = winH;
         params.x = x;
+        params.y = y;
         params.gravity = Gravity.TOP | Gravity.START;
         applyScreen(params);
         if (changed) {
-            pill.setPivotX(holeCenter);
-            pill.setPivotY(params.height / 2f);
-            float startScale = prevW > 0 ? Math.max(0.84f, Math.min(1.12f, (float) prevW / width)) : 0.9f;
+            pill.setPivotX(slop + holeCenter);
+            pill.setPivotY(visualH / 2f);
+            float startScale = prevW > 0 ? Math.max(0.84f, Math.min(1.12f, (float) prevW / winW)) : 0.9f;
             pill.setScaleX(startScale);
             pill.animate()
                     .scaleX(1f)
@@ -1151,6 +1553,8 @@ public class IslandService extends Service {
 
     private void applyScreen(WindowManager.LayoutParams params) {
         boolean lit = screenLit();
+        // Keep the pill on the lock screen (and while interactive). Hide only when the
+        // display is fully off so it does not wake or block the keyguard.
         pill.setVisibility(lit ? View.VISIBLE : View.INVISIBLE);
         params.alpha = lit ? 1f : 0f;
         params.flags = windowFlags(lit);
@@ -1164,8 +1568,13 @@ public class IslandService extends Service {
             }
             releaseRecognizer();
         }
-        if (windowManager != null && pill != null) {
-            windowManager.updateViewLayout(pill, params);
+        if (windowManager != null && pill != null && pill.isAttachedToWindow()) {
+            try {
+                windowManager.updateViewLayout(pill, params);
+            } catch (RuntimeException exc) {
+                Log.w(TAG, "applyScreen update failed; recreating pill", exc);
+                ensurePillForLockScreen();
+            }
         }
     }
 
@@ -1174,25 +1583,142 @@ public class IslandService extends Service {
         return power != null && power.isInteractive();
     }
 
+    private boolean keyguardLocked() {
+        KeyguardManager keyguard = getSystemService(KeyguardManager.class);
+        return keyguard != null && keyguard.isKeyguardLocked();
+    }
+
     private int windowFlags(boolean lit) {
         int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
-        if (!lit) {
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                // Show over the keyguard / lock screen when the display is on.
+                | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                | WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS
+                | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED;
+        // Stay touchable on the lock screen whenever the display is interactive.
+        if (!lit || onCall) {
             flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         }
         return flags;
     }
 
-    private void runMain(Runnable job) {
-        if (pill != null) {
-            pill.post(job);
+    private void watchCalls() {
+        if (telephony != null) {
+            return;
+        }
+        telephony = getSystemService(TelephonyManager.class);
+        if (telephony == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 31) {
+            TelephonyCallback callback = new CallStateCallback();
+            callCallback = callback;
+            try {
+                telephony.registerTelephonyCallback(getMainExecutor(), callback);
+            } catch (SecurityException exc) {
+                Log.w(TAG, "call watch denied", exc);
+                callCallback = null;
+            }
+            return;
+        }
+        callListener = new PhoneStateListener() {
+            @Override
+            @SuppressWarnings("deprecation")
+            public void onCallStateChanged(int state, String phoneNumber) {
+                mainHandler.post(() -> setOnCall(state));
+            }
+        };
+        try {
+            telephony.listen(callListener, PhoneStateListener.LISTEN_CALL_STATE);
+        } catch (SecurityException exc) {
+            Log.w(TAG, "call watch denied", exc);
+            callListener = null;
         }
     }
 
+    @SuppressLint("NewApi")
+    private final class CallStateCallback extends TelephonyCallback implements TelephonyCallback.CallStateListener {
+        @Override
+        public void onCallStateChanged(int state) {
+            mainHandler.post(() -> setOnCall(state));
+        }
+    }
+
+    private void setOnCall(int state) {
+        boolean next = state == TelephonyManager.CALL_STATE_OFFHOOK
+                || state == TelephonyManager.CALL_STATE_RINGING;
+        if (next == onCall) {
+            return;
+        }
+        onCall = next;
+        Log.i(TAG, "call " + (onCall ? "active" : "idle"));
+        if (onCall && listening) {
+            listening = false;
+            mainHandler.removeCallbacks(listenWatch);
+            releaseRecognizer();
+            if (waveView != null) {
+                waveView.setMode(false, false);
+            }
+            if (backdropView != null) {
+                backdropView.setState(IslandBackdropView.STATE_IDLE);
+            }
+            setPhase("Idle");
+        }
+        applyScreen();
+    }
+
+    private void stopWatchCalls() {
+        if (telephony == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 31 && callCallback instanceof TelephonyCallback) {
+            try {
+                telephony.unregisterTelephonyCallback((TelephonyCallback) callCallback);
+            } catch (RuntimeException ignored) {
+            }
+            callCallback = null;
+        } else if (callListener != null) {
+            try {
+                telephony.listen(callListener, PhoneStateListener.LISTEN_NONE);
+            } catch (RuntimeException ignored) {
+            }
+            callListener = null;
+        }
+        telephony = null;
+    }
+
+    private boolean addOverlay(View view, WindowManager.LayoutParams params) {
+        if (windowManager == null || view == null || params == null) {
+            return false;
+        }
+        if (view.getParent() != null) {
+            return true;
+        }
+        try {
+            windowManager.addView(view, params);
+            return true;
+        } catch (RuntimeException exc) {
+            Log.e(TAG, "add overlay type=" + params.type, exc);
+            return false;
+        }
+    }
+
+    private void runMain(Runnable job) {
+        if (pill != null && pill.isAttachedToWindow()) {
+            pill.post(job);
+            return;
+        }
+        mainHandler.post(job);
+    }
+
     private TextView label(String text) {
-        TextView view = new TextView(this);
+        return label(this, text);
+    }
+
+    private TextView label(Context context, String text) {
+        TextView view = new TextView(context);
         view.setText(text);
         view.setTextColor(0xFFF5F5F7);
         view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
@@ -1204,7 +1730,11 @@ public class IslandService extends Service {
     }
 
     private TextView chipLabel(String text, int bgColor, int textColor) {
-        TextView view = label(text);
+        return chipLabel(this, text, bgColor, textColor);
+    }
+
+    private TextView chipLabel(Context context, String text, int bgColor, int textColor) {
+        TextView view = label(context, text);
         view.setTextColor(textColor);
         view.setGravity(Gravity.CENTER);
         view.setPadding(dp(8), 0, dp(8), 0);
@@ -1233,15 +1763,18 @@ public class IslandService extends Service {
     @Override
     public void onDestroy() {
         inboxWatch.shutdownNow();
+        mainHandler.removeCallbacks(listenWatch);
         try {
             unregisterReceiver(screenReceiver);
         } catch (IllegalArgumentException ignored) {
         }
+        stopWatchCalls();
         releaseRecognizer();
         if (tts != null) {
             tts.shutdown();
         }
         mainHandler.removeCallbacks(hydrationTick);
+        mainHandler.removeCallbacks(pillLongPress);
         if (pill != null && windowManager != null) {
             try {
                 windowManager.removeView(pill);

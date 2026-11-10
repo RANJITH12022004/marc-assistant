@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bee_page">#0B0B0C</color>
+    <color name="bee_surface">#161618</color>
+    <color name="bee_ink">#F5F5F7</color>
+    <color name="bee_honey">#E8B15A</color>
+    <color name="bee_ok">#30D158</color>
+    <color name="bee_wait">#FF9F0A</color>
+    <color name="bee_fail">#FF453A</color>
+</resources>

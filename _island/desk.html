@@ -71,8 +71,16 @@
     input { flex: 1; min-width: 0; background: #101010; color: var(--text); border: 1px solid rgba(232,177,90,0.45); border-radius: 10px; padding: 12px 14px; }
     button.send { background: transparent; color: var(--amber); border: 1px solid rgba(232,177,90,0.7); border-radius: 10px; padding: 10px 14px; cursor: pointer; }
     .yesno { display: flex; gap: 8px; margin-top: 8px; }
+    #office { overflow: hidden; }
+    #office-log { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 12px 22px; }
+    .office-folder { color: var(--muted); font-size: 13px; padding: 10px 22px 0; }
+    .office-actions { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
     .tabbar { display: none; }
     .note { color: var(--muted); padding: 0 22px; line-height: 1.5; }
+    #mind { overflow: auto; }
+    .mind-card, .mind-pre { white-space: pre-wrap; margin: 0 22px 12px; padding: 12px 14px; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; background: #101010; line-height: 1.45; }
+    .mind-h { margin: 8px 22px 4px; font-size: 13px; color: var(--muted); font-weight: 560; }
+    #mind-search { border-top: 0; }
     @media (max-width: 800px) {
       .app { grid-template-columns: 1fr; grid-template-rows: 36px minmax(0, 1fr) auto; }
       .nav { display: none; }
@@ -81,8 +89,8 @@
       .big { flex: none; height: 46vw; }
       .small { flex: none; height: 32vw; }
       .list, #log { padding-left: 16px; padding-right: 16px; }
-      .tabbar { display: grid; grid-template-columns: repeat(5, 1fr); border-top: 1px solid var(--line); background: var(--panel); padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); }
-      .tabbar a { text-align: center; font-size: 12px; padding: 8px 2px; }
+      .tabbar { display: grid; grid-template-columns: repeat(6, 1fr); border-top: 1px solid var(--line); background: var(--panel); padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); }
+      .tabbar a { text-align: center; font-size: 11px; padding: 8px 2px; }
       .menubar { overflow-x: auto; }
     }
   </style>
@@ -91,7 +99,9 @@
   <div class="app">
     <div class="menubar" role="menubar">
       <button type="button" data-page="chat">Chat</button>
+      <button type="button" data-page="office">Office</button>
       <button type="button" data-page="agent">Agent</button>
+      <button type="button" data-page="mind">Mind</button>
       <div class="menu">
         <button type="button">Devices</button>
         <div class="drop">
@@ -115,7 +125,9 @@
     <nav class="nav" aria-label="Sections">
       <div class="brand"><strong>Roxx</strong><span>Marc Server</span></div>
       <a href="/chat" data-page="chat">Chat</a>
+      <a href="/office" data-page="office">Office</a>
       <a href="/agent" data-page="agent">Agent</a>
+      <a href="/mind" data-page="mind">Mind</a>
       <a href="/laptop" data-page="laptop">Laptop</a>
       <a href="/phone" data-page="phone">Phone</a>
       <a href="/server" data-page="server">Server</a>
@@ -140,8 +152,33 @@
           <button class="send" id="send" type="submit">Send</button>
         </form>
       </section>
+      <section class="page" id="office" data-page="office">
+        <p id="office-folder" class="office-folder">Office folder not set</p>
+        <div id="office-log"></div>
+        <form id="office-composer">
+          <div class="office-actions">
+            <button class="send" id="office-continue" type="submit">Continue</button>
+            <button class="send" id="office-new" type="button">New task</button>
+            <button class="send" id="office-stop" type="button">Stop</button>
+          </div>
+          <input id="office-text" placeholder="Office task" autocomplete="off" />
+          <button class="send" id="office-send" type="submit">Send</button>
+        </form>
+      </section>
       <section class="page" id="agent" data-page="agent">
         <div class="list" id="agent-list"></div>
+      </section>
+      <section class="page" id="mind" data-page="mind">
+        <div class="mind-card" id="mind-now">Nothing yet.</div>
+        <form id="mind-search">
+          <input id="mind-query" placeholder="Search the mind" autocomplete="off" />
+          <button class="send" id="mind-send" type="submit">Search</button>
+        </form>
+        <p class="note" id="mind-hits"></p>
+        <h2 class="mind-h">Today</h2>
+        <pre class="mind-pre" id="mind-today"></pre>
+        <h2 class="mind-h">Notes</h2>
+        <div class="list" id="mind-notes"></div>
       </section>
       <section class="page" id="laptop" data-page="laptop">
         <div class="list" id="laptop-list"></div>
@@ -171,15 +208,16 @@
         <div class="list" id="system-list"></div>
       </section>
       <section class="page" id="settings" data-page="settings">
-        <p class="note">This desk talks to the small Qwen on the home server. Chat can run the laptop, the phone, and the server. Questions go to Qwen. Commands run as tools. Server tools are status, allowlisted restarts, and docker for n8n. There is no raw shell.</p>
+        <p class="note">This desk talks to Hermes on the home server. Hermes is the agent; Meta AI and Needle are LLMs. Instant and scripted paths stay local. Leftovers become tools for the laptop, the phone, and the server. Cognee sits beside the mind vault for deeper recall.</p>
         <div class="list" id="settings-list"></div>
       </section>
     </div>
     <nav class="tabbar" aria-label="Sections">
       <a href="/chat" data-page="chat">Chat</a>
+      <a href="/office" data-page="office">Office</a>
       <a href="/agent" data-page="agent">Agent</a>
+      <a href="/mind" data-page="mind">Mind</a>
       <a href="/server" data-page="server">Server</a>
-      <a href="/laptop" data-page="laptop">Laptop</a>
       <a href="/settings" data-page="settings">Settings</a>
     </nav>
   </div>
@@ -190,7 +228,7 @@
     const START = (150 * Math.PI) / 180;
     const SWEEP = (240 * Math.PI) / 180;
     const PAGES = {
-      chat: "Chat", agent: "Agent", laptop: "Laptop", phone: "Phone",
+      chat: "Chat", office: "Office", agent: "Agent", mind: "Mind", laptop: "Laptop", phone: "Phone",
       server: "Server", disks: "Disks", system: "System", settings: "Settings"
     };
     const ACTION = /\b(open|launch|start|close|quit|exit|play|pause|resume|next|previous|stop|send|call|dial|text|whatsapp|instagram|search|volume|mute|restart|docker|containers|ollama|n8n|ls|files|journal|install|shell|bash|directory|folder)\b|\bon\s+(?:my\s+|the\s+)?(?:laptop|computer|pc|phone|mobile|server|linux)\b|\/home\/rox/i;
@@ -493,7 +531,10 @@
       rows(document.getElementById("settings-list"), [
         ["Name", "Roxx", null],
         ["Host", location.host, null],
-        ["Model", "Small Qwen on the home server", null],
+        ["Planner", (status && status.planner) || "hermes", null],
+        ["Hermes", status && status.hermes && status.hermes.ok ? "up" : (status ? "down" : "—"), null],
+        ["Meta AI", status && status.meta_ai && status.meta_ai.ok ? "keyed" : (status ? "no key" : "—"), null],
+        ["Cognee", status && status.cognee && status.cognee.ok ? "ready" : (status ? "—" : "—"), null],
         ["Default target", target, null],
         ["Readings", "Every 3 seconds", null],
       ]);
@@ -559,6 +600,8 @@
       document.title = `Roxx · ${PAGES[page]}`;
       const path = `/${page}`;
       if (push && location.pathname !== path) history.pushState({ page }, "", path);
+      if (page === "office") pullOffice();
+      if (page === "mind") pullMind();
     }
 
     document.querySelectorAll("[data-page]").forEach((link) => {
@@ -585,7 +628,9 @@
         }
       } catch { /* keep the last reading */ }
       renderStatus();
-      window.setTimeout(tick, 3000);
+      if (page === "office") pullOffice();
+      if (page === "mind") pullMind();
+      window.setTimeout(tick, page === "office" ? 1500 : 3000);
     }
 
     async function send(event) {
@@ -643,12 +688,156 @@
       renderChat();
     }
 
+    let office = { hops: [], state: "idle", remote: "", cwd: "", spoken: "", summary: "", reachable: false };
+    let officeBusy = false;
+
+    function hopLine(hop, index) {
+      const kind = hop && hop.kind ? hop.kind : "think";
+      const text = hop && hop.text ? hop.text : "";
+      return `hop ${index + 1} ${kind} ${text}`.trim();
+    }
+
+    function renderOffice() {
+      const folder = document.getElementById("office-folder");
+      const log = document.getElementById("office-log");
+      if (!folder || !log) return;
+      folder.textContent = office.reachable
+        ? (office.remote || office.cwd || "Office folder")
+        : (office.spoken || "Office machine isn't reachable.");
+      log.replaceChildren();
+      const hops = office.hops || [];
+      if (!hops.length && !office.summary) {
+        const hint = document.createElement("p");
+        hint.className = "hint";
+        hint.textContent = "Send a task. The next open continues the last folder.";
+        log.appendChild(hint);
+      }
+      hops.forEach((hop, index) => {
+        const row = document.createElement("div");
+        row.className = "steps" + (hop && hop.kind === "error" ? " step fail" : "");
+        row.textContent = hopLine(hop, index);
+        log.appendChild(row);
+      });
+      if (office.summary) {
+        const row = document.createElement("p");
+        row.className = "marc";
+        row.textContent = office.summary;
+        log.appendChild(row);
+      }
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function pullOffice() {
+      try {
+        const response = await fetch("/api/office", { cache: "no-store" });
+        if (response.ok) office = await response.json();
+      } catch { /* keep the last reading */ }
+      renderOffice();
+    }
+
+    async function sendOffice(event, resume) {
+      if (event) event.preventDefault();
+      const input = document.getElementById("office-text");
+      let said = (input.value || "").trim();
+      if (!said && resume !== false) said = "Continue from where we left off.";
+      if (!said || officeBusy) return;
+      input.value = "";
+      officeBusy = true;
+      try {
+        const response = await fetch("/api/office", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: said, resume: resume !== false }),
+        });
+        office = await response.json();
+      } catch {
+        office = Object.assign({}, office, { spoken: "I need a connection for that.", reachable: false });
+      }
+      officeBusy = false;
+      renderOffice();
+    }
+
+    async function stopOffice(event) {
+      if (event) event.preventDefault();
+      try {
+        const response = await fetch("/api/office-cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        office = await response.json();
+      } catch { /* keep */ }
+      renderOffice();
+    }
+
+    let mind = { now: "", today: "", notes: [], chat: [] };
+
+    function renderMind() {
+      const now = document.getElementById("mind-now");
+      const today = document.getElementById("mind-today");
+      const notes = document.getElementById("mind-notes");
+      if (now) now.textContent = mind.now || "Nothing yet.";
+      if (today) today.textContent = mind.today || "No daily note yet.";
+      if (notes) {
+        const rowsData = (mind.notes || []).map((note) => [note.title || note.path, note.kind || "", null]);
+        rows(notes, rowsData.length ? rowsData : [["No notes yet", "", null]]);
+      }
+    }
+
+    function restoreChat(rows) {
+      if (!rows || !rows.length || lines.length) return;
+      lines = rows.map((row) => ({
+        who: row.role === "user" ? "you" : "marc",
+        text: row.content || "",
+        machine: "",
+        steps: []
+      }));
+      renderChat();
+    }
+
+    async function pullMind() {
+      try {
+        const response = await fetch("/api/mind", { cache: "no-store" });
+        if (response.ok) {
+          mind = await response.json();
+          restoreChat(mind.chat);
+        }
+      } catch { /* keep */ }
+      renderMind();
+    }
+
+    async function searchMind(event) {
+      event.preventDefault();
+      const input = document.getElementById("mind-query");
+      const query = (input.value || "").trim();
+      const hits = document.getElementById("mind-hits");
+      if (!query) return;
+      try {
+        const response = await fetch("/api/mind", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "search", query }),
+        });
+        const data = await response.json();
+        mind = data;
+        if (hits) hits.textContent = data.spoken || "";
+      } catch {
+        if (hits) hits.textContent = "I need a connection for that.";
+      }
+      renderMind();
+    }
+
     document.getElementById("composer").addEventListener("submit", send);
     document.getElementById("send").addEventListener("click", send);
+    document.getElementById("office-composer").addEventListener("submit", (event) => sendOffice(event, true));
+    document.getElementById("office-new").addEventListener("click", (event) => sendOffice(event, false));
+    document.getElementById("office-stop").addEventListener("click", stopOffice);
+    document.getElementById("mind-search").addEventListener("submit", searchMind);
     if (history.scrollRestoration) history.scrollRestoration = "manual";
     if (location.pathname === "/" || location.pathname === "/index.html") history.replaceState({ page: "chat" }, "", "/chat");
     show((location.pathname.split("/")[1]) || "chat", false);
     renderStatus();
+    pullMind();
     tick();
   </script>
 </body>

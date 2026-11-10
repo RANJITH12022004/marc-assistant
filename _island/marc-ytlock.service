@@ -1,0 +1,17 @@
+[Unit]
+Description=TV Lock watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rox
+WorkingDirectory=/home/rox/marc
+Environment=YTLOCK_DIRECT=1
+Environment=YTLOCK_TV=192.168.68.100:5555
+ExecStart=/usr/bin/python3 /home/rox/marc/ytlock_tv.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,55 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.marc.island"
+    compileSdk 34
+    buildToolsVersion "34.0.0"
+    defaultConfig {
+        applicationId "com.marc.island"
+        minSdk 26
+        targetSdk 34
+        versionCode 60
+        versionName "2.49"
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+    // Match Rox debug signing so laptop installs replace without uninstall.
+    signingConfigs {
+        debug {
+            storeFile file("../rox-debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+    }
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+    androidResources {
+        noCompress += "cact"
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation "androidx.appcompat:appcompat:1.7.0"
+    implementation "androidx.drawerlayout:drawerlayout:1.2.0"
+}
+
+configurations.configureEach {
+    exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk7"
+    exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk8"
+}

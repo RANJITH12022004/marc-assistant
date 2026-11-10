@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#FF000000"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="18dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Permissions and device access Marc needs to operate."
+            android:textColor="#99EBEBF5"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/permission_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:background="#FF121214"
+            android:padding="14dp"
+            android:text="Checking…"
+            android:textColor="#FFE8B15A"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/enable_overlay"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="16dp"
+            android:background="#22E8B15A"
+            android:gravity="center"
+            android:text="Turn on overlay"
+            android:textColor="#FFE8B15A"
+            android:textSize="15sp" />
+
+        <TextView
+            android:id="@+id/enable_accessibility"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="10dp"
+            android:background="#14FFFFFF"
+            android:gravity="center"
+            android:text="Turn on accessibility"
+            android:textColor="#FFF5F5F7"
+            android:textSize="15sp" />
+
+        <TextView
+            android:id="@+id/listen_setup"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="10dp"
+            android:background="#14FFFFFF"
+            android:gravity="center"
+            android:text="Test listen"
+            android:textColor="#FFF5F5F7"
+            android:textSize="15sp" />
+
+        <TextView
+            android:id="@+id/play_water"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="10dp"
+            android:background="#14FFFFFF"
+            android:gravity="center"
+            android:text="Play water reminder"
+            android:textColor="#FFF5F5F7"
+            android:textSize="15sp" />
+    </LinearLayout>
+</ScrollView>

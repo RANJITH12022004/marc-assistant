@@ -14,14 +14,23 @@ from urllib.parse import quote_plus
 
 from settings import settings
 
-try:
-    import pyautogui
+pyautogui = None  # type: ignore
 
-    pyautogui.FAILSAFE = False  # corner mouse must not kill Marc mid-command
-    # Keep PAUSE near-zero so hotkey/media/close feel instant
-    pyautogui.PAUSE = 0.01
-except Exception:  # noqa: BLE001
-    pyautogui = None  # type: ignore
+
+def _gui():
+    """Lazy-load pyautogui so installing it does not require a worker restart forever."""
+    global pyautogui
+    if pyautogui is not None:
+        return pyautogui
+    try:
+        import pyautogui as _pg
+
+        _pg.FAILSAFE = False  # corner mouse must not kill Marc mid-command
+        _pg.PAUSE = 0.01
+        pyautogui = _pg
+        return pyautogui
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _load_json(path: Path) -> dict:
@@ -51,6 +60,9 @@ class OSTools:
         self.apps = _load_json(settings.apps_config)
         self.hotkeys = _load_json(settings.hotkeys_config)
         self._alias_index = self._build_alias_index()
+        # Last opened/focused app — used so type_text works for every application.
+        self._last_app: str = ""
+        self._last_pids: set[int] = set()
 
     def _build_alias_index(self) -> Dict[str, str]:
         idx: Dict[str, str] = {}
@@ -123,44 +135,71 @@ class OSTools:
                 {"app": name},
             )
 
+        launched = False
+        launch_pid: Optional[int] = None
+        before_pids = self._snapshot_pids()
         # Prefer local install / shell protocol; fall back to URL apps
         for cmd in meta.get("commands", []):
             if cmd.startswith("ms-settings:"):
                 os.startfile(cmd)  # noqa: S606
-                return ToolResult(True, f"Opened {canon}.")
+                launched = True
+                break
             # Allow simple wildcards in WindowsApps paths
             if "*" in cmd:
                 import glob
 
                 matches = glob.glob(os.path.expandvars(cmd))
                 if matches:
-                    subprocess.Popen([matches[0]], shell=False)  # noqa: S603
-                    return ToolResult(True, f"Opened {canon}.")
+                    proc = subprocess.Popen([matches[0]], shell=False)  # noqa: S603
+                    launch_pid = proc.pid
+                    launched = True
+                    break
                 continue
             path = Path(os.path.expandvars(cmd))
             if path.exists():
-                subprocess.Popen([str(path)], shell=False)  # noqa: S603
-                return ToolResult(True, f"Opened {canon}.")
+                proc = subprocess.Popen([str(path)], shell=False)  # noqa: S603
+                launch_pid = proc.pid
+                launched = True
+                break
 
-        shell = meta.get("shell")
-        if shell:
-            try:
-                if shell.startswith("start "):
-                    os.system(shell)  # noqa: S605
-                else:
-                    subprocess.Popen(shell, shell=True)  # noqa: S602
-                return ToolResult(True, f"Opened {canon}.")
-            except Exception as exc:  # noqa: BLE001
-                # Fall through to URL if present
-                if not meta.get("url"):
-                    return ToolResult(False, f"Failed to open {canon}: {exc}")
+        if not launched:
+            shell = meta.get("shell")
+            if shell:
+                try:
+                    if shell.startswith("start "):
+                        os.system(shell)  # noqa: S605
+                    else:
+                        proc = subprocess.Popen(shell, shell=True)  # noqa: S602
+                        launch_pid = proc.pid
+                    launched = True
+                except Exception as exc:  # noqa: BLE001
+                    # Fall through to URL if present
+                    if not meta.get("url"):
+                        return ToolResult(False, f"Failed to open {canon}: {exc}")
 
-        url = meta.get("url")
-        if url:
-            webbrowser.open(url)
-            return ToolResult(True, f"Opened {canon}.")
+        if not launched:
+            url = meta.get("url")
+            if url:
+                webbrowser.open(url)
+                launched = True
 
-        return ToolResult(False, f"Could not find executable for {canon}.")
+        if not launched:
+            return ToolResult(False, f"Could not find executable for {canon}.")
+
+        # Remember this launch so later type_text focuses the right app (any application).
+        time.sleep(0.25)
+        new_pids = self._snapshot_pids() - before_pids
+        if launch_pid:
+            new_pids.add(launch_pid)
+        self._remember_launch(canon, new_pids)
+
+        # Critical: steal focus onto the app we just opened before any type_text.
+        focused = self._await_focus(canon, timeout=2.8, pids=self._last_pids)
+        return ToolResult(
+            True,
+            f"Opened {canon}.",
+            {"app": canon, "focused": bool(focused), "pids": sorted(self._last_pids)[:8]},
+        )
 
     def open_url(self, url: str) -> ToolResult:
         url = url.strip()
@@ -183,15 +222,15 @@ class OSTools:
         webbrowser.open(url)
         return ToolResult(True, f"Searching {engine} for {q}.", {"url": url})
 
-    def type_text(self, text: str, confirmed: bool = False) -> ToolResult:
+    def type_text(self, text: str, confirmed: bool = False, app: str = "") -> ToolResult:
         if not confirmed:
             return ToolResult(
                 False,
                 f"Type into the focused window: “{text[:80]}”? Confirm to proceed.",
-                {"text": text},
+                {"text": text, "app": app or ""},
                 needs_confirm=True,
             )
-        if pyautogui is None:
+        if _gui() is None:
             return ToolResult(False, "pyautogui not available.")
         text = text or ""
         if not text.strip():
@@ -211,14 +250,29 @@ class OSTools:
                 return self.hotkey("enter", confirmed=True)
             return ToolResult(False, "Nothing to type.")
 
+        target = (app or self._last_app or "").strip()
+        focused = False
+        if target:
+            pids = self._last_pids if self._same_app(target, self._last_app) else set()
+            focused = self._await_focus(target, timeout=2.5, pids=pids)
+            if not focused:
+                return ToolResult(
+                    False,
+                    f"I couldn't focus {target} to type into it.",
+                    {"app": target},
+                )
+            self._remember_launch(target, pids or self._last_pids)
+            time.sleep(0.18)
+
         method = self._insert_text(text)
         if send_after:
             time.sleep(0.12)
             self.hotkey("enter", confirmed=True)
+        where = target or "focused window"
         return ToolResult(
             True,
-            "Typed text into the focused window.",
-            {"chars": len(text), "method": method, "sent": send_after},
+            f"Typed text into {where}.",
+            {"chars": len(text), "method": method, "sent": send_after, "app": target, "focused": focused},
         )
 
     def _insert_text(self, text: str) -> str:
@@ -272,7 +326,7 @@ class OSTools:
                     break
             except Exception:  # noqa: BLE001
                 time.sleep(0.1)
-        if pyautogui:
+        if _gui():
             prev = getattr(pyautogui, "PAUSE", 0.01)
             try:
                 pyautogui.PAUSE = 0
@@ -293,7 +347,7 @@ class OSTools:
 
     def click_then_type(self, text: str, delay: float = 3.0, confirmed: bool = True) -> ToolResult:
         """Countdown then type into whatever the user clicked/focused."""
-        if pyautogui is None:
+        if _gui() is None:
             return ToolResult(False, "pyautogui not available.")
         delay = max(0.5, float(delay or 3.0))
         print(f"[marc] Click where to type — typing in {delay:.0f}s…", flush=True)
@@ -338,7 +392,7 @@ class OSTools:
                 needs_confirm=True,
             )
 
-        if pyautogui is None:
+        if _gui() is None:
             return ToolResult(False, "pyautogui not available.")
 
         opened = self.open_app("whatsapp")
@@ -394,7 +448,7 @@ class OSTools:
                 {"action": action, "keys": keys},
                 needs_confirm=True,
             )
-        if pyautogui is None:
+        if _gui() is None:
             return ToolResult(False, "pyautogui not available.")
         prev = getattr(pyautogui, "PAUSE", 0.01)
         try:
@@ -468,7 +522,7 @@ class OSTools:
         return ToolResult(False, f"Unknown metric '{metric}'.")
 
     def volume_media(self, action: str, level: Optional[int] = None) -> ToolResult:
-        if pyautogui is None:
+        if _gui() is None:
             return ToolResult(False, "pyautogui not available.")
         action = (action or "").lower()
         # VK codes via pyautogui press names
@@ -545,6 +599,256 @@ class OSTools:
         except Exception as exc:  # noqa: BLE001
             return ToolResult(False, f"Could not open settings: {exc}")
 
+    def _focus_hwnd(self, hwnd: int) -> bool:
+        """Force a window to the foreground (AttachThreadInput bypasses Windows focus steal)."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            if not hwnd:
+                return False
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            else:
+                user32.ShowWindow(hwnd, 5)  # SW_SHOW
+            fg = user32.GetForegroundWindow()
+            if fg == hwnd:
+                return True
+            cur_tid = kernel32.GetCurrentThreadId()
+            fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+            target_tid = user32.GetWindowThreadProcessId(hwnd, None)
+            attached_fg = False
+            attached_tg = False
+            if fg_tid and fg_tid != cur_tid:
+                attached_fg = bool(user32.AttachThreadInput(cur_tid, fg_tid, True))
+            if target_tid and target_tid != cur_tid and target_tid != fg_tid:
+                attached_tg = bool(user32.AttachThreadInput(cur_tid, target_tid, True))
+            try:
+                user32.AllowSetForegroundWindow(-1)
+            except Exception:  # noqa: BLE001
+                pass
+            user32.BringWindowToTop(hwnd)
+            user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)  # HWND_TOPMOST
+            user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)  # HWND_NOTOPMOST
+            user32.SetForegroundWindow(hwnd)
+            if attached_tg and target_tid:
+                user32.AttachThreadInput(cur_tid, target_tid, False)
+            if attached_fg and fg_tid:
+                user32.AttachThreadInput(cur_tid, fg_tid, False)
+            time.sleep(0.05)
+            return int(user32.GetForegroundWindow()) == int(hwnd)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _snapshot_pids(self) -> set[int]:
+        """Current process IDs (best-effort)."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.windll.kernel32
+            arr = (wintypes.DWORD * 4096)()
+            needed = wintypes.DWORD()
+            if not kernel32.K32EnumProcesses(ctypes.byref(arr), ctypes.sizeof(arr), ctypes.byref(needed)):
+                return set()
+            count = int(needed.value) // ctypes.sizeof(wintypes.DWORD)
+            return {int(arr[i]) for i in range(count) if arr[i]}
+        except Exception:  # noqa: BLE001
+            try:
+                out = subprocess.check_output(
+                    ["tasklist", "/FO", "CSV", "/NH"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                )
+                pids: set[int] = set()
+                for line in out.splitlines():
+                    parts = line.split(",")
+                    if len(parts) >= 2:
+                        try:
+                            pids.add(int(parts[1].strip().strip('"')))
+                        except ValueError:
+                            pass
+                return pids
+            except Exception:  # noqa: BLE001
+                return set()
+
+    def _remember_launch(self, app: str, pids: set[int] | None = None) -> None:
+        label = (app or "").strip()
+        if label:
+            self._last_app = label
+        if pids is not None:
+            self._last_pids = {int(p) for p in pids if p}
+
+    def _same_app(self, a: str, b: str) -> bool:
+        ca, _ = self.resolve_app(a or "")
+        cb, _ = self.resolve_app(b or "")
+        left = (ca or a or "").strip().lower()
+        right = (cb or b or "").strip().lower()
+        return bool(left and right and left == right)
+
+    def _process_images_for(self, name: str) -> list[str]:
+        """Resolve exe names for ANY configured app from apps.json + aliases."""
+        canon, meta = self.resolve_app(name)
+        key = (canon or name or "").strip().lower()
+        targets: list[str] = []
+
+        def add(image: str) -> None:
+            image = (image or "").strip().lower()
+            if image and image not in targets:
+                if not image.endswith(".exe"):
+                    image = f"{image}.exe"
+                if image not in targets:
+                    targets.append(image)
+
+        # Known Windows aliases (optional extras; apps.json remains source of truth).
+        extras = {
+            "edge": ["msedge.exe"],
+            "vscode": ["code.exe"],
+            "code": ["code.exe"],
+            "calculator": ["calculatorapp.exe", "calc.exe"],
+            "terminal": ["windowsterminal.exe", "wt.exe", "powershell.exe", "pwsh.exe", "cmd.exe"],
+            "camera": ["windowscamera.exe"],
+            "photos": ["photos.exe"],
+            "snip": ["screenclippinghost.exe", "snippingtool.exe"],
+            "store": ["winstore.app.exe"],
+            "clock": ["time.exe"],
+            "task manager": ["taskmgr.exe"],
+        }
+        for img in extras.get(key, []):
+            add(img)
+
+        if meta:
+            for cmd in meta.get("commands") or []:
+                raw = str(cmd)
+                if raw.startswith("ms-") or "://" in raw:
+                    continue
+                base = Path(os.path.expandvars(raw.split("*")[0] + ("*" if "*" in raw else ""))).name
+                # For wildcard paths take the filename pattern end.
+                if "*" in raw:
+                    base = Path(raw.replace("\\", "/").split("/")[-1]).name.replace("*", "")
+                    if base.lower().endswith(".exe"):
+                        add(base)
+                    continue
+                base = Path(os.path.expandvars(raw)).name
+                if base.lower().endswith(".exe"):
+                    add(base)
+            shell = str(meta.get("shell") or "").strip()
+            if shell and not shell.lower().startswith("start "):
+                token = shell.split()[0]
+                base = Path(token).name
+                if base.lower().endswith(".exe") or "." not in base:
+                    add(base)
+
+        # Canon + spoken name + aliases from apps.json
+        add(key)
+        add((name or "").strip().lower())
+        if meta:
+            for alias in meta.get("aliases") or []:
+                token = re.sub(r"[^a-z0-9]+", "", str(alias).lower())
+                if len(token) >= 3:
+                    add(token)
+        return targets
+
+    def _focus_by_pids(self, pids: set[int]) -> bool:
+        """Focus the newest visible top-level window owned by one of these PIDs."""
+        wanted = {int(p) for p in pids if p}
+        if not wanted:
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            found: list[int] = []
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            def enum_proc(hwnd, _lp):  # noqa: N803
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                if user32.GetWindow(hwnd, 4):  # GW_OWNER
+                    return True
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if int(pid.value) not in wanted:
+                    return True
+                rect = wintypes.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                if (rect.right - rect.left) < 40 or (rect.bottom - rect.top) < 40:
+                    return True
+                found.append(int(hwnd))
+                return True
+
+            user32.EnumWindows(enum_proc, 0)
+            for hwnd in reversed(found):
+                if self._focus_hwnd(hwnd):
+                    return True
+            return False
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _focus_by_process(self, images: list[str]) -> bool:
+        """Focus the newest visible top-level window owned by one of these exe names."""
+        wanted = {img.lower() for img in images if img}
+        if not wanted:
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            found: list[int] = []
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            def enum_proc(hwnd, _lp):  # noqa: N803
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                # Owned/tool windows are usually not the main app surface.
+                if user32.GetWindow(hwnd, 4):  # GW_OWNER
+                    return True
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if not pid.value:
+                    return True
+                handle = kernel32.OpenProcess(0x0410, False, pid.value)  # QUERY | VM_READ
+                if not handle:
+                    handle = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED
+                if not handle:
+                    return True
+                try:
+                    image = ""
+                    buf = ctypes.create_unicode_buffer(260)
+                    if psapi.GetModuleBaseNameW(handle, None, buf, 260):
+                        image = buf.value.lower()
+                    else:
+                        size = wintypes.DWORD(260)
+                        full = ctypes.create_unicode_buffer(260)
+                        if kernel32.QueryFullProcessImageNameW(handle, 0, full, ctypes.byref(size)):
+                            image = Path(full.value).name.lower()
+                    if image in wanted:
+                        rect = wintypes.RECT()
+                        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                        if (rect.right - rect.left) < 40 or (rect.bottom - rect.top) < 40:
+                            return True
+                        found.append(int(hwnd))
+                finally:
+                    kernel32.CloseHandle(handle)
+                return True
+
+            user32.EnumWindows(enum_proc, 0)
+            if not found:
+                return False
+            for hwnd in reversed(found):
+                if self._focus_hwnd(hwnd):
+                    return True
+            return False
+        except Exception:  # noqa: BLE001
+            return False
+
     def _focus_by_title(self, needle: str) -> bool:
         """Bring a window whose title contains needle to the foreground (Windows)."""
         needle = (needle or "").strip().lower()
@@ -555,74 +859,93 @@ class OSTools:
             from ctypes import wintypes
 
             user32 = ctypes.windll.user32
-            found = []
+            found: list[int] = []
 
             @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
             def enum_proc(hwnd, _lp):  # noqa: N803
                 if not user32.IsWindowVisible(hwnd):
                     return True
                 length = user32.GetWindowTextLengthW(hwnd)
-                if length <= 0:
-                    return True
-                buf = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buf, length + 1)
-                title = buf.value.lower()
-                if needle in title:
-                    found.append(hwnd)
+                # Win11 Notepad often has an empty title — still consider via process path.
+                title = ""
+                if length > 0:
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buf, length + 1)
+                    title = buf.value.lower()
+                if needle and needle in title:
+                    found.append(int(hwnd))
                 return True
 
             user32.EnumWindows(enum_proc, 0)
             if not found:
                 return False
-            hwnd = found[0]
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-            user32.SetForegroundWindow(hwnd)
-            return True
+            for hwnd in reversed(found):
+                if self._focus_hwnd(hwnd):
+                    return True
+            return False
         except Exception:  # noqa: BLE001
             return False
+
+    def _title_needles_for(self, name: str) -> list[str]:
+        canon, meta = self.resolve_app(name)
+        label = (canon or name or "").strip()
+        needles: list[str] = []
+        for item in (label, label.replace(" ", ""), (name or "").strip()):
+            item = (item or "").strip().lower()
+            if item and item not in needles:
+                needles.append(item)
+        if meta:
+            for alias in meta.get("aliases") or []:
+                item = str(alias).strip().lower()
+                if item and item not in needles:
+                    needles.append(item)
+        return needles
+
+    def _await_focus(self, name: str, timeout: float = 2.5, pids: set[int] | None = None) -> bool:
+        """Poll until the named app window exists and is focused (any application)."""
+        canon, _meta = self.resolve_app(name)
+        label = (canon or name or "").strip()
+        if not label and not pids:
+            return False
+        needles = self._title_needles_for(label or name or "")
+        images = self._process_images_for(label or name or "")
+        use_pids = {int(p) for p in (pids or self._last_pids or set()) if p}
+        deadline = time.time() + max(0.4, float(timeout))
+        while time.time() < deadline:
+            if use_pids and self._focus_by_pids(use_pids):
+                return True
+            if images and self._focus_by_process(images):
+                return True
+            for needle in needles:
+                if self._focus_by_title(needle):
+                    return True
+            time.sleep(0.12)
+        if use_pids and self._focus_by_pids(use_pids):
+            return True
+        if images and self._focus_by_process(images):
+            return True
+        for needle in needles:
+            if self._focus_by_title(needle):
+                return True
+        return False
 
     def _focus_existing(self, name: str) -> ToolResult:
         canon, _meta = self.resolve_app(name)
         label = (canon or name or "").strip()
         if not label:
             return ToolResult(False, "No app to focus.")
-        # Try common title fragments
-        for needle in {label, label.replace(" ", ""), name.strip().lower()}:
-            if needle and self._focus_by_title(needle):
-                return ToolResult(True, f"Focused {label}.", {"app": label})
+        pids = self._last_pids if self._same_app(label, self._last_app) else set()
+        if self._await_focus(label, timeout=1.8, pids=pids):
+            self._remember_launch(label, self._last_pids if pids else self._last_pids)
+            return ToolResult(True, f"Focused {label}.", {"app": label})
         return ToolResult(False, f"Could not find an open window for {label}.")
 
     def _kill_app_process(self, name: str, wait: bool = False) -> bool:
         """Best-effort taskkill for known apps. Default: fire-and-forget (instant return)."""
-        canon, meta = self.resolve_app(name)
-        key = (canon or name or "").strip().lower()
-        # Map canonical apps → common Windows image names
-        images = {
-            "camera": ["WindowsCamera.exe"],
-            "spotify": ["Spotify.exe"],
-            "chrome": ["chrome.exe"],
-            "brave": ["brave.exe"],
-            "edge": ["msedge.exe"],
-            "firefox": ["firefox.exe"],
-            "notepad": ["notepad.exe"],
-            "whatsapp": ["WhatsApp.exe"],
-            "vlc": ["vlc.exe"],
-            "cursor": ["Cursor.exe"],
-            "code": ["Code.exe"],
-            "vscode": ["Code.exe"],
-            "terminal": ["WindowsTerminal.exe", "wt.exe", "powershell.exe", "pwsh.exe", "cmd.exe"],
-            "powershell": ["powershell.exe", "pwsh.exe", "WindowsTerminal.exe"],
-            "cmd": ["cmd.exe"],
-        }
-        targets = list(images.get(key) or [])
-        if meta:
-            for cmd in meta.get("commands") or []:
-                base = Path(str(cmd)).name
-                if base and base.lower().endswith(".exe"):
-                    targets.append(base)
+        canon, _meta = self.resolve_app(name)
+        targets = self._process_images_for(canon or name)
         if not targets:
             return False
-        import subprocess
 
         launched = False
         for img in dict.fromkeys(targets):  # dedupe preserve order
@@ -659,7 +982,11 @@ class OSTools:
         if name == "web_search":
             return self.web_search(args.get("query", ""), args.get("engine", "google"))
         if name == "type_text":
-            return self.type_text(args.get("text", ""), confirmed=confirmed)
+            return self.type_text(
+                args.get("text", ""),
+                confirmed=confirmed,
+                app=str(args.get("app") or args.get("into") or args.get("window") or ""),
+            )
         if name == "click_then_type":
             return self.click_then_type(
                 args.get("text", ""),
@@ -708,7 +1035,7 @@ class OSTools:
                     )
                 # Focus + Alt+F4 if process kill missed (unknown / already closed)
                 focused = self._focus_existing(kill_name)
-                if focused.ok and pyautogui is not None:
+                if focused.ok and _gui() is not None:
                     prev = getattr(pyautogui, "PAUSE", 0.01)
                     try:
                         pyautogui.PAUSE = 0
@@ -717,7 +1044,7 @@ class OSTools:
                         pyautogui.PAUSE = prev
                     return ToolResult(True, f"Closed {canon or app}.", {"app": canon or app})
             # Unnamed / current window
-            if pyautogui is None:
+            if _gui() is None:
                 return ToolResult(False, "pyautogui not available.")
             prev = getattr(pyautogui, "PAUSE", 0.01)
             try:

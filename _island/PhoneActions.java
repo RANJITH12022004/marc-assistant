@@ -109,7 +109,8 @@ public final class PhoneActions {
             return "com.nothing.camera";
         }
         if ("whatsapp_prefill".equals(tool) || "whatsapp_send".equals(tool)) {
-            message(context, "WhatsApp", "com.whatsapp", args.optString("contact", args.optString("phone")), args.optString("text"), args.optBoolean("send"));
+            String who = firstArg(args, "contact", "phone", "to");
+            message(context, "WhatsApp", "com.whatsapp", who, args.optString("text"), args.optBoolean("send", false));
             return "com.whatsapp";
         }
         if ("type_text".equals(tool) || "type_into".equals(tool)) {
@@ -336,7 +337,12 @@ public final class PhoneActions {
         if (contact == null) {
             return "";
         }
-        String digits = contact.replaceAll("[^0-9+]", "");
+        String wanted = contact.trim();
+        if (wanted.isEmpty()) {
+            fail("Who should I message?");
+            return "";
+        }
+        String digits = wanted.replaceAll("[^0-9+]", "");
         if (digits.length() >= 7) {
             return digits;
         }
@@ -344,14 +350,15 @@ public final class PhoneActions {
             fail("I need contacts for that.");
             return "";
         }
+        // Never use a bare %% LIKE — that dumps the whole book (Guru / Pavan noise).
         Cursor cursor = context.getContentResolver().query(
                 ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
                 new String[]{ContactsContract.CommonDataKinds.Phone.NUMBER, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME},
                 ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?",
-                new String[]{"%" + contact.trim() + "%"},
+                new String[]{"%" + wanted + "%"},
                 null);
         if (cursor == null) {
-            fail("I couldn't find " + contact + " in contacts.");
+            fail("I couldn't find " + wanted + " in contacts.");
             return "";
         }
         java.util.LinkedHashMap<String, String> found = new java.util.LinkedHashMap<>();
@@ -367,23 +374,59 @@ public final class PhoneActions {
             }
         }
         cursor.close();
+        if (found.isEmpty()) {
+            fail("I couldn't find " + wanted + " in contacts.");
+            return "";
+        }
+        String needle = wanted.toLowerCase(java.util.Locale.US);
         java.util.ArrayList<String> exact = new java.util.ArrayList<>();
+        java.util.ArrayList<String> starts = new java.util.ArrayList<>();
+        java.util.ArrayList<String> firstWord = new java.util.ArrayList<>();
         for (String name : found.keySet()) {
-            if (name.equalsIgnoreCase(contact.trim())) {
+            String low = name.toLowerCase(java.util.Locale.US);
+            if (low.equals(needle)) {
                 exact.add(name);
+            } else if (low.startsWith(needle + " ") || low.startsWith(needle)) {
+                starts.add(name);
+            } else {
+                String first = low.split("\\s+")[0];
+                if (first.equals(needle)) {
+                    firstWord.add(name);
+                }
             }
         }
-        java.util.List<String> names = exact.isEmpty() ? new java.util.ArrayList<>(found.keySet()) : exact;
-        if (names.isEmpty()) {
-            fail("I couldn't find " + contact + " in contacts.");
+        // Ignore loose substring hits (e.g. empty/garbage query matching Guru/Pavan).
+        if (exact.isEmpty() && starts.isEmpty() && firstWord.isEmpty()) {
+            fail("I couldn't find " + wanted + " in contacts.");
             return "";
         }
-        if (names.size() > 1) {
-            fail("Which one, " + names.get(0) + " or " + names.get(1) + "?");
-            return "";
+        // Unique match only — never guess among several Ranjith* rows.
+        if (exact.size() == 1) {
+            String number = found.get(exact.get(0));
+            return number == null ? "" : number;
         }
-        String number = found.get(names.get(0));
-        return number == null ? "" : number;
+        if (exact.isEmpty() && starts.size() == 1) {
+            String number = found.get(starts.get(0));
+            return number == null ? "" : number;
+        }
+        if (exact.isEmpty() && starts.isEmpty() && firstWord.size() == 1) {
+            String number = found.get(firstWord.get(0));
+            return number == null ? "" : number;
+        }
+        java.util.List<String> names = !exact.isEmpty() ? exact
+                : (!starts.isEmpty() ? starts : firstWord);
+        fail("Which one, " + names.get(0) + " or " + names.get(1) + "?");
+        return "";
+    }
+
+    private static String firstArg(JSONObject args, String... keys) {
+        for (String key : keys) {
+            String value = args.optString(key, "").trim();
+            if (!value.isEmpty()) {
+                return value;
+            }
+        }
+        return "";
     }
 
     public static Drawable iconForName(Context context, String name) {

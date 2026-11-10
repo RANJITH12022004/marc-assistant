@@ -6,21 +6,6 @@
     android:orientation="vertical">
 
     <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:gravity="center"
-        android:paddingTop="14dp"
-        android:paddingBottom="14dp"
-        android:text="Marc"
-        android:textColor="#FFE8B15A"
-        android:textSize="17sp" />
-
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="0.5dp"
-        android:background="#14FFFFFF" />
-
-    <TextView
         android:id="@+id/empty_chat"
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -124,7 +109,7 @@
             android:layout_height="44dp"
             android:layout_weight="1"
             android:background="@drawable/composer_bg"
-            android:hint="Message"
+            android:hint="Ask Marc"
             android:imeOptions="actionSend"
             android:inputType="textCapSentences"
             android:maxLines="1"

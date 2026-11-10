@@ -668,14 +668,14 @@ def parse_compound(transcript: str) -> Optional[Dict[str, Any]]:
             return {
                 "intent": "mail_compose",
                 "confidence": 0.95,
-                "steps": [
+            "steps": [
                     {
                         "tool": "mail_compose",
                         "args": {"to": to, "subject": subject, "body": body},
                         "confirm": True,
                     }
-                ],
-                "source": "compound",
+            ],
+            "source": "compound",
                 "reply": f"Send email to {to}? Confirm to proceed.",
             }
 
@@ -1472,7 +1472,7 @@ def parse_compound(transcript: str) -> Optional[Dict[str, Any]]:
             "steps": [{"tool": "volume_media", "args": {"action": "play"}}],
             "source": "compound",
             "reply": "Playing.",
-        }
+            }
 
     # Bare "play <title>" → YouTube search (never Windows media keys)
     m = re.match(r"^\s*(?:please\s+)?play\s+(.+)$", t, re.I)

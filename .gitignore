@@ -7,6 +7,10 @@ door/.env.local
 door/.vercel
 door/node_modules/
 door/.next/
+ytlock/.vercel
+ytlock/.env.local
+ytlock/node_modules/
+ytlock/.next/
 .cursor/
 .venv/
 __pycache__/
@@ -36,6 +40,26 @@ MARC-!/
 # Local deploy helpers with private addresses
 _island/_*.py
 _island/*.apk
+_island/cursor.env
+
+# Android build / machine-local / signing
+_island/android/.gradle/
+_island/android/**/build/
+_island/android/local.properties
+_island/**/*.keystore
+*.tgz
+_island/tools/gradle-*/
+
+# Scratch dumps / screenshots / reference pulls
+_island/_last_phone*
+_island/_rox_refs/
+_island/d.xml
+_island/d2.xml
+_island/marc-ui*.xml
+_island/cam.xml
+_island/ui.xml
+_island/marc.xml
+_island/android-src.tgz
 
 # Notes that include private IPs
 marc mobile deployed till now.md

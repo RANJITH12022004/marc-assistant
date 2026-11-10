@@ -1,0 +1,17 @@
+[Unit]
+Description=Marc office Cursor worker
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rox
+WorkingDirectory=/home/rox/marc
+EnvironmentFile=-/home/rox/marc/cursor.env
+ExecStartPre=-/home/rox/marc/office_mount.sh
+ExecStart=/home/rox/marc/cursor-venv/bin/python /home/rox/marc/marc_cursor.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

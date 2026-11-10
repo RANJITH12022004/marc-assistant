@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Marc coordinator. Qwen writes steps. Local Laya scores them. Laptop and phone execute."""
+"""Marc coordinator. Hermes agent plans leftovers; Needle/Meta are LLMs. Laptop and phone execute."""
 from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import subprocess
 import threading
@@ -11,6 +12,12 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+import cognee_bridge
+import hermes_client
+import mind_store
+import muse_client
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434/api/chat")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "marc")
@@ -20,26 +27,49 @@ LAYA_URL = os.environ.get("LAYA_URL", "http://127.0.0.1:8091/score")
 LAPTOP_URL = os.environ.get("MARC_LAPTOP_URL", "").rstrip("/")
 TOKEN_PATH = os.environ.get("MARC_TOKEN_FILE", "/home/rox/marc/secret")
 MEMORY_PATH = os.environ.get("MARC_MEMORY_FILE", "/home/rox/marc/memory.json")
+CURSOR_URL = os.environ.get("MARC_CURSOR_URL", "http://127.0.0.1:8093").rstrip("/")
 BIND = os.environ.get("MARC_BIND", "127.0.0.1")
 PORT = int(os.environ.get("MARC_PORT", "8090"))
 CONFIRM_TTL = int(os.environ.get("MARC_CONFIRM_TTL", "300"))
 MARC_EMAIL = os.environ.get("MARC_EMAIL", "").strip()
+NEEDLE_BIN = os.environ.get("NEEDLE_BIN", "/home/rox/marc/needle-runtime/needle")
+NEEDLE_MODEL = os.environ.get("NEEDLE_MODEL", "/home/rox/marc/needle-runtime/needle3.cact")
+NEEDLE_DIR = os.environ.get("NEEDLE_DIR", "/home/rox/marc")
+NEEDLE_TOOLS_PATH = os.environ.get("NEEDLE_TOOLS", os.path.join(NEEDLE_DIR, "needle_tools.json"))
+NEEDLE_INDEX_PATH = os.environ.get("NEEDLE_INDEX", os.path.join(NEEDLE_DIR, "needle_tools.idx"))
+NEEDLE_URL = os.environ.get("NEEDLE_URL", "http://127.0.0.1:8094").rstrip("/")
+NEEDLE_SYSTEM_PATH = os.environ.get("NEEDLE_SYSTEM", os.path.join(NEEDLE_DIR, "needle_system.txt"))
+NEEDLE_ACT = float(os.environ.get("NEEDLE_ACT", "0.45"))
+PLANNER = os.environ.get("MARC_PLANNER", "hermes").strip().lower()
+_needle_lock = threading.Lock()
+_ACTIVITY_LOCK = threading.Lock()
+_ACTIVITY_RUNS: list[dict] = []
+_ACTIVITY_MAX = 60
+_ACTION_RE = re.compile(
+    r"(?i)\b(?:open|launch|start|close|quit|exit|play|pause|resume|next|previous|stop|"
+    r"send|call|dial|text|whatsapp|instagram|search|volume|mute|restart|docker|"
+    r"containers|ollama|n8n|ls|files|journal|install|shell|bash|directory|folder|"
+    r"status|check|temp|cpu)\b|"
+    r"\bon\s+(?:my\s+|the\s+)?(?:laptop|computer|pc|phone|mobile|server|linux)\b"
+)
 
 CONFIRM_TOOLS = {"mail_send", "mail_compose", "dial", "open_food_search"}
 PHONE_TOOLS = {
     "play_music", "dial", "whatsapp_prefill", "whatsapp_send", "sms_send", "instagram_send",
-    "open_food_search", "media_key", "ui_tap", "type_into",
+    "open_food_search", "media_key", "ui_tap", "type_into", "open_app", "close_app",
 }
 LAPTOP_TOOLS = {
     "open_app", "close_app", "focus_window", "google_search", "youtube_search", "youtube_home",
     "youtube_media", "play_nth", "type_text", "hotkey", "volume_media", "mail_search",
     "mail_summarize", "mail_compose", "mail_send", "calendar_list", "calendar_create",
     "drive_search", "system_status", "web_search", "open_url",
+    "desktop_status", "desktop_snapshot", "desktop_click", "desktop_type", "desktop_press",
 }
 SERVER_TOOLS = {
     "server_status", "service_status", "service_restart", "docker_list", "docker_restart",
     "server_shell",
 }
+MIND_TOOLS = {"mind_now", "mind_note", "mind_recall", "brain_recall"}
 SERVER_UNITS = {
     "api": "marc-api",
     "marc-api": "marc-api",
@@ -75,7 +105,8 @@ Rules:
 - Server tools: server_status {}, service_status {name}, service_restart {name}, docker_list {}, docker_restart {name}. Names are api, desk, bridge, ollama, n8n.
 - Copy the person's name into args.to. Put the topic in subject and a short body.
 - No sudo, no rm -rf /, no reboot, no shutdown.
-- Chat only: steps=[]. Missing slot: steps=[] and ask one question in reply.
+- If the user named an action or device, steps must not be empty.
+- Chat only (no action verbs): steps=[]. Missing slot: steps=[] and ask one question in reply.
 """
 
 PENDING: dict[str, dict] = {}
@@ -230,6 +261,265 @@ def _extract_json(text: str) -> dict:
         return json.loads(_relax_json(blob))
 
 
+def _needle_prop(type_name: str, description: str, **extra) -> dict:
+    prop = {"type": type_name, "description": description}
+    prop.update(extra)
+    return prop
+
+
+def _needle_tool(
+    name: str,
+    description: str,
+    properties: dict,
+    required: list | None = None,
+    triggers: list | None = None,
+) -> dict:
+    schema = {
+        "name": name,
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": properties,
+        },
+    }
+    if required:
+        schema["parameters"]["required"] = required
+    if triggers:
+        schema["triggers"] = triggers
+    return schema
+
+
+def _needle_tool_schemas() -> list[dict]:
+    """Keep this small. Needle 3 reads every tool each turn; extras tank confidence."""
+    return [
+        _needle_tool(
+            "open_app",
+            "Open an app by name.",
+            {"name": _needle_prop("string", "App name such as Terminal, Google, YouTube, Spotify")},
+            ["name"],
+            [r"\b(?:open|launch)\b"],
+        ),
+        _needle_tool(
+            "type_into",
+            "Type into the open app. send true means press enter after typing.",
+            {
+                "text": _needle_prop("string", "Exact text to type"),
+                "send": _needle_prop("boolean", "True when the user said enter or send it"),
+            },
+            ["text"],
+            [r"\b(?:type|enter|ipconfig|ssh)\b"],
+        ),
+        _needle_tool(
+            "play_music",
+            "Play a song on Spotify. Not for YouTube.",
+            {"query": _needle_prop("string", "Song or artist")},
+            None,
+            [r"\bspotify\b", r"\bplay\b(?![\s\S]*\byoutube\b)"],
+        ),
+        _needle_tool(
+            "youtube_search",
+            "Search YouTube for a video.",
+            {"query": _needle_prop("string", "Video query after youtube or search")},
+            ["query"],
+            [r"\byoutube\b"],
+        ),
+        _needle_tool(
+            "google_search",
+            "Search Google for a query.",
+            {"query": _needle_prop("string", "Search query after google or search for")},
+            ["query"],
+            [r"\bgoogle\b"],
+        ),
+        _needle_tool(
+            "whatsapp_send",
+            "WhatsApp a named contact.",
+            {
+                "contact": _needle_prop("string", "Person to message"),
+                "text": _needle_prop("string", "Message body"),
+                "send": _needle_prop("boolean", "True only when the user said send"),
+            },
+            ["contact", "text"],
+            [r"\bwhatsapp\b"],
+        ),
+        _needle_tool(
+            "server_status",
+            "Home server CPU, temperature, RAM, and service health.",
+            {},
+            None,
+            [r"\bserver\b"],
+        ),
+    ]
+
+
+def _ensure_needle_files() -> None:
+    os.makedirs(NEEDLE_DIR, exist_ok=True)
+    payload = json.dumps(_needle_tool_schemas(), separators=(",", ":"))
+    current = ""
+    try:
+        with open(NEEDLE_TOOLS_PATH, encoding="utf-8") as handle:
+            current = handle.read()
+    except OSError:
+        current = ""
+    if current != payload:
+        with open(NEEDLE_TOOLS_PATH, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        try:
+            os.remove(NEEDLE_INDEX_PATH)
+        except OSError:
+            pass
+    facts = _needle_system("phone")
+    try:
+        with open(NEEDLE_SYSTEM_PATH, encoding="utf-8") as handle:
+            old = handle.read()
+    except OSError:
+        old = ""
+    if old != facts:
+        with open(NEEDLE_SYSTEM_PATH, "w", encoding="utf-8") as handle:
+            handle.write(facts)
+
+
+def _needle_system(session: str) -> str:
+    now = time.strftime("%Y-%m-%d %a %H:%M")
+    device = "phone" if session == "phone" else "laptop"
+    return f"date: {now}; locale: en-IN; device: {device}; user: Ranjith; assistant: Marc"
+
+
+def _parse_needle_out(raw: str) -> dict:
+    blob = (raw or "").strip()
+    start = blob.find("{")
+    end = blob.rfind("}")
+    if start < 0 or end < start:
+        return {}
+    try:
+        parsed = json.loads(blob[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _needle_calls(parsed: dict) -> list:
+    calls = parsed.get("function_calls") or []
+    if not isinstance(calls, list):
+        return []
+    return [call for call in calls if isinstance(call, dict)]
+
+
+def _heuristic_plan(text: str, session: str = "") -> dict | None:
+    scripted = _scripted_plan(text, session)
+    if scripted:
+        return scripted
+    steps = _obvious_steps(text, _coerce_steps(text, _fill_slots(text, _normalize_steps(_fallback_steps(text)))))
+    if not steps:
+        return None
+    print("[marc-api] needle-fallback", [step.get("tool") for step in steps], flush=True)
+    return {"reply": _brief_reply(steps, ""), "steps": steps}
+
+
+def _steps_from_needle_calls(text: str, parsed: dict, session: str = "") -> dict:
+    try:
+        confidence = float(parsed.get("confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    steps = []
+    if confidence >= NEEDLE_ACT:
+        for call in _needle_calls(parsed):
+            name = str(call.get("name") or "").strip()
+            args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+            if name:
+                steps.append({"tool": name, "args": dict(args)})
+        steps = _coerce_steps(text, _fill_slots(text, _normalize_steps(steps)))
+        steps = _obvious_steps(text, steps)
+    print(
+        "[marc-api] needle",
+        [step.get("tool") for step in steps],
+        "confidence", parsed.get("confidence"),
+        "held", [call.get("name") for call in (parsed.get("suppressed_calls") or []) if isinstance(call, dict)],
+        flush=True,
+    )
+    if not steps:
+        return _heuristic_plan(text, session) or {"reply": "I don't have a tool for that.", "steps": []}
+    return {"reply": _brief_reply(steps, ""), "steps": steps}
+
+
+def _needle_reset() -> None:
+    try:
+        _post(NEEDLE_URL + "/reset", {}, timeout=4)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def plan_with_needle(text: str, note: str = "", context: str = "", session: str = "") -> dict:
+    """Ask the local Needle server which Marc tools to run. Empty calls means no action."""
+    prompt = text.strip()
+    if note:
+        prompt = f"{prompt}\n{note}"
+    parsed = {}
+    with _needle_lock:
+        _needle_reset()
+        try:
+            parsed = _post(NEEDLE_URL + "/complete", {"input": prompt}, timeout=55)
+        except Exception as exc:  # noqa: BLE001
+            print("[marc-api] needle fail", exc, flush=True)
+            _needle_reset()
+            fallback = _heuristic_plan(text, session)
+            if fallback:
+                return fallback
+            kind = str(exc).lower()
+            if "timed out" in kind or "timeout" in kind:
+                return {"reply": "Needle is still thinking.", "steps": []}
+            return {"reply": "Needle isn't running.", "steps": []}
+        _needle_reset()
+    if not isinstance(parsed, dict):
+        parsed = _parse_needle_out(str(parsed))
+    if "function_calls" not in parsed and isinstance(parsed.get("output"), str):
+        parsed = _parse_needle_out(parsed.get("output") or "")
+    return _steps_from_needle_calls(text, parsed, session)
+
+
+def _looks_like_action(text: str) -> bool:
+    return bool(_ACTION_RE.search(text or ""))
+
+
+def plan_with_hermes(text: str, note: str = "", context: str = "", session: str = "") -> dict:
+    """Hermes agent (Meta AI ± marc-muse). Falls back to Needle LLM, then heuristics."""
+    planned = hermes_client.plan_command(text, note=note, context=context, session=session)
+    steps = planned.get("steps") if isinstance(planned, dict) else None
+    reply = str((planned or {}).get("reply") or "").strip()
+    source = str((planned or {}).get("source") or "hermes")
+    if isinstance(steps, list) and steps:
+        return {"reply": reply or "On it.", "steps": steps, "source": source}
+    # Hermes/Meta returned a spoken-only refusal or empty plan with a clear reply.
+    if reply and not steps and source in ("muse", "meta"):
+        low = reply.lower()
+        if any(token in low for token in ("can't", "cannot", "refuse", "stopping", "paused", "isn't running")):
+            return {"reply": reply, "steps": [], "source": source}
+    # Action-like utterances must get tools: try heuristics before Needle chat.
+    if _looks_like_action(text):
+        heuristic = _heuristic_plan(text, session)
+        if heuristic and (heuristic.get("steps") or []):
+            return {**heuristic, "source": "heuristic"}
+    needle = plan_with_needle(text, note=note, context=context, session=session)
+    if isinstance(needle, dict) and (needle.get("steps") or []):
+        return {**needle, "source": needle.get("source") or "needle"}
+    if _looks_like_action(text):
+        heuristic = _heuristic_plan(text, session)
+        if heuristic:
+            return {**heuristic, "source": "heuristic"}
+    if reply:
+        return {"reply": reply, "steps": [], "source": source}
+    if source == "hermes-miss":
+        return {"reply": "Hermes isn't running.", "steps": [], "source": source}
+    return needle if isinstance(needle, dict) else {"reply": "Hermes isn't running.", "steps": [], "source": source}
+
+
+def plan_command(text: str, note: str = "", context: str = "", session: str = "") -> dict:
+    if PLANNER in ("hermes", "muse", "meta"):
+        return plan_with_hermes(text, note=note, context=context, session=session)
+    if PLANNER == "qwen":
+        return plan_with_qwen(text, note=note, context=context)
+    return plan_with_needle(text, note=note, context=context, session=session)
+
+
 def plan_with_qwen(text: str, note: str = "", context: str = "") -> dict:
     user = text if not note else f"{text}\n\nScorer note: {note}\nReturn corrected JSON only."
     if context:
@@ -304,6 +594,12 @@ def _brief_reply(steps: list, reply: str) -> str:
     if tool in ("mail_compose", "mail_send"):
         who = str(args.get("to") or "").strip()
         return f"Mail to {who}." if who else "Mail."
+    if tool == "mind_now":
+        return "Checking the mind."
+    if tool == "mind_note":
+        return "Saving a note."
+    if tool == "mind_recall":
+        return "Looking that up."
     if len(reply) > 32:
         return reply[:30].rstrip() + "…"
     return reply
@@ -363,8 +659,15 @@ def _fill_slots(text: str, steps: list) -> list:
                 args["query"] = ""
         if tool == "open_food_search" and not str(args.get("query") or "").strip():
             args["query"] = topic or text
-        if tool in ("whatsapp_prefill", "whatsapp_send") and not str(args.get("text") or "").strip() and topic:
-            args["text"] = topic
+        if tool in ("whatsapp_prefill", "whatsapp_send", "sms_send", "instagram_send"):
+            contact, body = _contact_and_body(text, "phone")
+            if not str(args.get("contact") or args.get("phone") or args.get("to") or "").strip() and contact:
+                args["contact"] = contact
+            if not str(args.get("text") or "").strip():
+                if body:
+                    args["text"] = body
+                elif topic:
+                    args["text"] = topic
     return steps
 
 
@@ -429,11 +732,27 @@ def _fallback_steps(text: str) -> list:
             "tool": "dial",
             "args": {"number": who.group(1).strip(" .") if who else ""},
         })
-    if re.search(r"\bplay\b", low) and ("phone" in low or "song" in low or "music" in low or "spotify" in low):
+    if re.search(r"\bplay\b", low) and "youtube" not in low and ("phone" in low or "song" in low or "music" in low or "spotify" in low):
         steps.append({
             "device": "phone",
             "tool": "play_music",
             "args": {"query": _music_query(text)},
+        })
+    youtube = re.search(r"\byoutube\b", low) and re.search(r"\b(?:search|play|find|for)\b", low)
+    if youtube:
+        query = re.search(r"\b(?:youtube(?:\s+for)?|for)\s+(.+)$", text, re.I)
+        steps.append({
+            "device": "laptop",
+            "tool": "youtube_search",
+            "args": {"query": query.group(1).strip(" .") if query else ""},
+        })
+    google = re.search(r"\bgoogle\b", low) and re.search(r"\bsearch\b", low)
+    if google and "youtube" not in low:
+        query = re.search(r"\b(?:search(?:\s+for)?|google(?:\s+and\s+search(?:\s+for)?)?)\s+(.+)$", text, re.I)
+        steps.append({
+            "device": "laptop",
+            "tool": "google_search",
+            "args": {"query": query.group(1).strip(" .") if query else ""},
         })
     return steps[:6]
 
@@ -462,7 +781,9 @@ def _obvious_steps(text: str, steps: list) -> list:
                 "body": f"Hi {who or 'there'}, about {topic}." if topic else "Hi.",
             },
         })
-    wants_music = "spotify" in low or bool(re.search(r"\bplay\b", low) and re.search(r"\b(music|song|songs|spotify)\b", low))
+    wants_music = "youtube" not in low and (
+        "spotify" in low or bool(re.search(r"\bplay\b", low) and re.search(r"\b(music|song|songs|spotify)\b", low))
+    )
     if wants_music and "play_music" not in have:
         added.append({
             "device": "phone",
@@ -509,15 +830,22 @@ def _coerce_steps(text: str, steps: list) -> list:
         elif tool in {"tel_call", "phone_call", "call", "dial"}:
             tool = "dial"
             args["number"] = str(args.get("number") or args.get("to") or "")
+        elif "youtube" in low and tool in {"play_music", "play_nth", "youtube_media", "play_video"}:
+            tool = "youtube_search"
+            if not args.get("query"):
+                match = re.search(r"\b(?:youtube|for)\s+(.+)$", text, re.I)
+                args["query"] = match.group(1).strip(" .") if match else str(args.get("query") or args.get("title") or "")
+        elif tool == "sms_send" and re.search(r"\b(?:type|open)\b", low) and re.search(r"\bsend it\b", low) and not re.search(r"\b(?:sms|text|message)\b", low):
+            continue
         elif "on my phone" in low and tool in {"play_nth", "youtube_media", "play_video"}:
             tool = "play_music"
             if not args.get("query"):
                 match = re.search(r"\bplay\s+(.+?)(?:\s+on\s+(?:my\s+)?phone)?$", text, re.I)
                 args["query"] = match.group(1).strip(" .") if match else str(args.get("title") or "the song")
-        if tool not in PHONE_TOOLS and tool not in LAPTOP_TOOLS and tool not in SERVER_TOOLS:
+        if tool not in PHONE_TOOLS and tool not in LAPTOP_TOOLS and tool not in SERVER_TOOLS and tool not in MIND_TOOLS:
             continue
         step["tool"] = tool
-        if tool in SERVER_TOOLS:
+        if tool in SERVER_TOOLS or tool in MIND_TOOLS:
             step["device"] = "server"
         elif tool in PHONE_TOOLS:
             step["device"] = "phone"
@@ -702,11 +1030,37 @@ def _server_shell(cmd: str) -> dict:
     return {"ok": done.returncode == 0, "message": out}
 
 
+def mind_call(tool: str, args: dict) -> dict:
+    args = args or {}
+    try:
+        mind_store.seed()
+        if tool == "mind_now":
+            return {"ok": True, "message": mind_store.now_speak()}
+        if tool == "mind_note":
+            return {"ok": True, "message": mind_store.write_note(str(args.get("title") or ""), str(args.get("body") or ""))}
+        if tool == "mind_recall":
+            return {"ok": True, "message": mind_store.recall(str(args.get("query") or args.get("q") or ""))}
+        if tool == "brain_recall":
+            return {"ok": True, "message": cognee_bridge.brain_speak(str(args.get("query") or args.get("q") or ""))}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)[:180]}
+    return {"ok": False, "message": "Unknown mind tool."}
+
+
 def exec_step(step: dict) -> dict:
     """Run one tool on the server, laptop, or phone queue."""
     tool = str(step.get("tool") or "")
     args = dict(step.get("args") or {})
-    if tool == "server_shell" or tool in SERVER_TOOLS or step.get("device") == "server":
+    if tool in MIND_TOOLS:
+        result = mind_call(tool, args)
+        return {
+            "ok": bool(result.get("ok")),
+            "message": result.get("message") or "",
+            "device": "server",
+            "phone_step": None,
+        }
+    device = str(step.get("device") or "").strip().lower()
+    if tool == "server_shell" or tool in SERVER_TOOLS or device == "server":
         result = server_call(tool, args)
         return {
             "ok": bool(result.get("ok")),
@@ -714,7 +1068,19 @@ def exec_step(step: dict) -> dict:
             "device": "server",
             "phone_step": None,
         }
-    if step.get("device") == "phone" or tool in PHONE_TOOLS:
+    if device == "laptop":
+        try:
+            result = laptop_call("/tool", {"tool": tool, "args": args, "confirmed": True})
+        except Exception:  # noqa: BLE001
+            result = {"ok": False, "message": "Laptop isn't connected."}
+        ok = bool(result.get("ok"))
+        return {
+            "ok": ok,
+            "message": result.get("message") or ("Laptop isn't connected." if not ok else ""),
+            "device": "laptop",
+            "phone_step": None,
+        }
+    if device == "phone" or tool in PHONE_TOOLS:
         queued = {**step, "device": "phone", "tool": tool, "args": args}
         return {
             "ok": True,
@@ -759,13 +1125,17 @@ def gate_steps(transcript: str, plan: dict, allow_retry: bool) -> dict:
         scored = _local_score(step)
         step = {**step, "score": scored}
         tool = step.get("tool") or ""
+        device = str(step.get("device") or "").strip().lower()
         if MARC_EMAIL and tool in ("mail_compose", "mail_send"):
             args = dict(step.get("args") or {})
             args["from"] = MARC_EMAIL
             step = {**step, "args": args}
-        if step.get("device") == "server" or tool in SERVER_TOOLS:
+        # Explicit device wins for dual tools like open_app (phone + laptop).
+        if device == "server" or tool in SERVER_TOOLS or tool in MIND_TOOLS:
             accepted_server.append(step)
-        elif step.get("device") == "phone" or tool in PHONE_TOOLS:
+        elif device == "laptop":
+            accepted_laptop.append(step)
+        elif device == "phone" or tool in PHONE_TOOLS:
             phone_steps.append(step)
         else:
             accepted_laptop.append(step)
@@ -804,6 +1174,8 @@ def gate_steps(transcript: str, plan: dict, allow_retry: bool) -> dict:
         "phone_steps": phone_steps,
         "machines": machines,
         "steps_run": steps_run,
+        "planner": plan.get("planner") or PLANNER,
+        "source": plan.get("source") or "",
     }
     _remember_run(result)
     return result
@@ -905,9 +1277,227 @@ def _steps_from_laya(text: str, scored: dict) -> list | None:
 
 
 def _multi_phrase(text: str) -> bool:
-    import re
+    """True when the utterance chains more than one action/clause."""
+    raw = text or ""
+    if re.search(
+        r"\b(?:and(?:\s+then)?|then|also|after\s+that|plus|first|next|afterwards)\b|,|;",
+        raw,
+        re.I,
+    ):
+        return True
+    # Two device targets in one breath → continuous multi-device plan.
+    devices = re.findall(
+        r"\bon\s+(?:my\s+|the\s+)?(?:phone|mobile|laptop|computer|pc|server|linux)\b",
+        raw,
+        re.I,
+    )
+    return len(devices) >= 2
 
-    return bool(re.search(r"\b(?:and|then|also)\b", text, re.I))
+
+def _rag_context(text: str, session: str = "") -> str:
+    """Pull Cognee + mind vault snippets into Hermes planning context."""
+    bits: list[str] = []
+    try:
+        mind_store.seed()
+        now = str(mind_store.now_speak() or "").strip()
+        if now and "nothing" not in now.lower():
+            bits.append(now[:220])
+        recalled = str(mind_store.recall(text) or "").strip()
+        if recalled and "couldn't" not in recalled.lower() and "nothing" not in recalled.lower():
+            bits.append(recalled[:220])
+    except Exception as exc:  # noqa: BLE001
+        print("[marc-api] mind rag skip", exc, flush=True)
+    try:
+        brain = cognee_bridge.recall(text, datasets=["personal", "actions"], top_k=6)
+        hits = brain.get("hits") if isinstance(brain, dict) else None
+        if isinstance(hits, list) and hits:
+            for hit in hits[:4]:
+                line = str((hit or {}).get("text") or "").strip()
+                if line:
+                    bits.append(line[:180])
+        else:
+            spoken = str((brain or {}).get("text") or "").strip()
+            if spoken and "nothing in the brain" not in spoken.lower():
+                bits.append(spoken[:220])
+    except Exception as exc:  # noqa: BLE001
+        print("[marc-api] cognee rag skip", exc, flush=True)
+    # Dedupe while preserving order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for bit in bits:
+        key = bit.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(bit)
+    return " · ".join(out[:5])
+
+
+def _plan_context(text: str, session: str) -> str:
+    base = _context_line(session)
+    rag = _rag_context(text, session)
+    if rag:
+        return f"{base}\nBrain: {rag}"
+    return base
+
+
+def _split_clauses(text: str) -> list[str]:
+    parts = re.split(
+        r"\s*(?:,\s*|\s+and(?:\s+then)?\s+|\s+then\s+|\s+after\s+that\s+|\s+also\s+|\s*;\s*)\s*",
+        text or "",
+        flags=re.I,
+    )
+    clauses = [part.strip(" .") for part in parts if part and part.strip(" .")]
+    return clauses
+
+
+def _chain_steps_from_text(text: str, session: str = "", target: str = "auto") -> list[dict]:
+    """Deterministic continuous-command expansion so Hermes can't drop later clauses."""
+    steps: list[dict] = []
+    default = _session_target(text, session, target)
+    for clause in _split_clauses(text):
+        low = clause.lower()
+        device = _device_in_clause(clause, default)
+        opened = re.search(r"\b(?:open|launch|start)\s+(.+)$", clause, re.I)
+        closed = re.search(r"\b(?:close|quit|exit)\s+(.+)$", clause, re.I)
+        if opened or closed:
+            name = (opened or closed).group(1)
+            name = re.sub(
+                r"\s+on\s+(?:my\s+|the\s+)?(?:phone|mobile|laptop|computer|pc|server|linux)$",
+                "",
+                name,
+                flags=re.I,
+            ).strip(" .")
+            if not name:
+                continue
+            tool = "open_app" if opened else "close_app"
+            args = {"name": name} if device == "phone" else {"app": name}
+            steps.append({"device": device, "tool": tool, "args": args})
+            continue
+        typed = re.search(r"\b(?:type|write|dictate|text|message)\s+(.+)$", clause, re.I)
+        if typed:
+            payload = typed.group(1).strip(" .")
+            payload = re.sub(
+                r"\s+on\s+(?:my\s+|the\s+)?(?:phone|mobile|laptop|computer|pc)$",
+                "",
+                payload,
+                flags=re.I,
+            ).strip(" .")
+            # Strip leftover cue words from the typed body.
+            payload = re.sub(r"^(?:that\s+|saying\s+)", "", payload, flags=re.I).strip(" .")
+            draft = bool(re.search(r"\b(?:don'?t|do not|dont)\s+send\b|\bdraft\b", low, re.I))
+            send = (not draft) and bool(re.search(r"\bsend\b", low))
+            text_low = (text or "").lower()
+            opened_wa = any(
+                row.get("tool") == "open_app"
+                and "whatsapp" in str((row.get("args") or {}).get("name") or (row.get("args") or {}).get("app") or "").lower()
+                for row in steps
+            )
+            # Messaging clauses must open the contact chat — never type name+body into WhatsApp search.
+            if ("whatsapp" in text_low or opened_wa) and re.search(r"\b(?:text|message)\b", low):
+                contact, body = _contact_and_body(clause if "text" in low or "message" in low else text, session)
+                if not contact:
+                    contact, body = _contact_and_body(text, session)
+                if not body and payload:
+                    # Fallback: first name token + remainder.
+                    words = payload.split()
+                    contact = contact or (words[0] if words else "")
+                    body = body or (" ".join(words[1:]) if len(words) > 1 else "")
+                if contact:
+                    steps.append({
+                        "device": "phone",
+                        "tool": "whatsapp_send",
+                        "args": {"contact": contact, "text": body, "send": bool(send)},
+                    })
+                    continue
+            # Prefer laptop typing when the utterance/target is laptop — never bounce to phone.
+            use_laptop = (
+                device == "laptop"
+                or default == "laptop"
+                or _laptop_named(text)
+                or target == "laptop"
+            ) and not _phone_named(clause)
+            if use_laptop:
+                steps.append({"device": "laptop", "tool": "type_text", "args": {"text": payload}})
+                if send:
+                    steps.append({"device": "laptop", "tool": "hotkey", "args": {"action": "enter"}})
+            else:
+                steps.append({
+                    "device": "phone",
+                    "tool": "type_into",
+                    "args": {"text": payload, "send": bool(send)},
+                })
+            continue
+        if re.search(r"\b(?:list\s+)?(?:docker|containers)\b", low):
+            steps.append({"device": "server", "tool": "docker_list", "args": {}})
+            continue
+        if (
+            re.search(r"\b(?:status|health|how hot|temperature|temp|load|cpu|check)\b", low)
+            or _server_named(clause)
+            or re.search(r"\b(?:check|status)\s+(?:the\s+)?server\b", low)
+        ):
+            if device == "server" or _server_named(clause) or re.search(r"\bserver\b", low):
+                steps.append({"device": "server", "tool": "server_status", "args": {}})
+                continue
+        restart = re.search(
+            r"\brestart\s+(?:the\s+)?(ollama|model|qwen|n8n|desk|site|web|api|bridge|marc-api|marc-desk|marc-bridge)\b",
+            clause,
+            re.I,
+        )
+        if restart:
+            name = restart.group(1).lower()
+            if name == "n8n":
+                steps.append({"device": "server", "tool": "docker_restart", "args": {"name": "n8n"}})
+            else:
+                steps.append({"device": "server", "tool": "service_restart", "args": {"name": name}})
+    return steps
+
+
+def _hermes_rag_plan(text: str, session: str, target: str = "auto") -> dict:
+    """Hermes plans every actionable utterance with Cognee/mind RAG context."""
+    context = _plan_context(text, session)
+    print(
+        "[marc-api] hermes-rag",
+        "multi" if _multi_phrase(text) else "single",
+        "brain" if "Brain:" in context else "no-brain",
+        flush=True,
+    )
+    planned = plan_command(text, context=context, session=session)
+    if not isinstance(planned, dict):
+        planned = {"reply": "On it.", "steps": []}
+    steps = list(planned.get("steps") or [])
+    chain = _chain_steps_from_text(text, session, target)
+    messaging_tools = {"whatsapp_send", "whatsapp_prefill", "sms_send", "instagram_send"}
+    muse_messaging = any(
+        isinstance(s, dict) and str(s.get("tool") or "") in messaging_tools for s in steps
+    )
+    if _multi_phrase(text):
+        hermes_wrong_device = bool(steps) and (
+            target == "laptop" or _laptop_named(text)
+        ) and not _phone_named(text) and any(
+            isinstance(s, dict) and str(s.get("device") or "") == "phone"
+            for s in steps
+        )
+        # Muse owns messaging decomposition — never replace whatsapp/sms/instagram with chain type_into.
+        if muse_messaging:
+            print("[marc-api] hermes-rag keep-muse-messaging", [s.get("tool") for s in steps if isinstance(s, dict)], flush=True)
+        elif chain and (len(chain) > len(steps) or hermes_wrong_device):
+            print("[marc-api] hermes-rag fill", [step.get("tool") for step in chain], flush=True)
+            planned = {
+                **planned,
+                "reply": planned.get("reply") or _brief_reply(chain, ""),
+                "steps": chain,
+                "source": "chain" if hermes_wrong_device else (planned.get("source") or "hermes"),
+            }
+        elif not steps:
+            heuristic = _heuristic_plan(text, session)
+            if heuristic and (heuristic.get("steps") or []):
+                planned = {**heuristic, "source": "heuristic"}
+            elif chain:
+                planned = {"reply": _brief_reply(chain, ""), "steps": chain, "source": "chain"}
+    elif not steps and chain:
+        planned = {"reply": _brief_reply(chain, ""), "steps": chain, "source": "chain"}
+    return _finish_plan(text, session, planned, target)
 
 
 PHONE_STATE: dict[str, dict] = {}
@@ -951,13 +1541,111 @@ def _session_target(text: str, session: str, requested: str = "auto") -> str:
     return "phone" if session == "phone" else "laptop"
 
 
+def _activity_event(run: dict, event_type: str, text: str = "", device: str = "", message: str = "") -> None:
+    events = run.setdefault("events", [])
+    events.append({
+        "at": int(time.time() * 1000),
+        "type": event_type,
+        "text": text or "",
+        "device": device or "",
+        "message": message or "",
+    })
+
+
+def _activity_start(text: str, session: str) -> dict:
+    run = {
+        "id": secrets.token_hex(4),
+        "at": int(time.time() * 1000),
+        "session_id": session or "phone",
+        "text": text or "",
+        "phase": "heard",
+        "planner": PLANNER,
+        "source": "",
+        "spoken": "",
+        "steps": [],
+        "events": [],
+    }
+    _activity_event(run, "heard", text or "")
+    with _ACTIVITY_LOCK:
+        _ACTIVITY_RUNS.insert(0, run)
+        del _ACTIVITY_RUNS[_ACTIVITY_MAX:]
+    return run
+
+
+def _activity_attach(result: dict, run: dict | None) -> dict:
+    if not isinstance(result, dict):
+        return result
+    if run is None:
+        return result
+    run["spoken"] = result.get("spoken") or ""
+    run["source"] = result.get("source") or run.get("source") or ""
+    run["planner"] = result.get("planner") or PLANNER
+    run["phase"] = "done"
+    steps = []
+    for item in result.get("steps_run") or []:
+        if not isinstance(item, dict):
+            continue
+        ok = bool(item.get("ok", True))
+        row = {
+            "device": item.get("device") or "",
+            "tool": item.get("tool") or "",
+            "status": "ok" if ok else "fail",
+            "message": item.get("message") or "",
+        }
+        steps.append(row)
+        _activity_event(
+            run,
+            "step_ok" if ok else "step_fail",
+            row["tool"],
+            row["device"],
+            row["message"],
+        )
+    if not steps:
+        for step in result.get("phone_steps") or []:
+            if not isinstance(step, dict):
+                continue
+            row = {
+                "device": "phone",
+                "tool": step.get("tool") or "",
+                "status": "queued",
+                "message": "",
+            }
+            steps.append(row)
+            _activity_event(run, "step_start", row["tool"], "phone", "")
+    run["steps"] = steps
+    _activity_event(run, "spoken", run["spoken"])
+    _activity_event(run, "done")
+    result = {
+        **result,
+        "run_id": run["id"],
+        "planner": run["planner"],
+        "source": run.get("source") or result.get("source") or "",
+    }
+    _remember_run(result)
+    return result
+
+
+def activity_snapshot(session_id: str = "", since_ms: int = 0) -> dict:
+    with _ACTIVITY_LOCK:
+        rows = list(_ACTIVITY_RUNS)
+    if session_id:
+        rows = [row for row in rows if not row.get("session_id") or row.get("session_id") == session_id]
+    if since_ms > 0:
+        rows = [row for row in rows if int(row.get("at") or 0) >= since_ms]
+    current = rows[0] if rows and rows[0].get("phase") not in {"done", "fail"} else None
+    return {"ok": True, "runs": rows[:30], "current": current, "agent": dict(_LAST_RUN)}
+
+
 def _remember_run(result: dict) -> None:
     global _LAST_RUN
     _LAST_RUN = {
         "spoken": result.get("spoken") or "",
         "machines": list(result.get("machines") or []),
         "steps_run": list(result.get("steps_run") or []),
-        "at": int(time.time()),
+        "planner": result.get("planner") or PLANNER,
+        "source": result.get("source") or "",
+        "run_id": result.get("run_id") or "",
+        "at": int(time.time() * 1000),
     }
     _memory_save()
 
@@ -973,12 +1661,33 @@ def _state(session: str) -> dict:
     })
 
 
+def _office_blank() -> dict:
+    return {
+        "agent_id": "",
+        "cwd": "/home/rox/office/work",
+        "remote": "",
+        "last_summary": "",
+    }
+
+
+def _office_clean(raw) -> dict:
+    data = _office_blank()
+    if not isinstance(raw, dict):
+        return data
+    data["agent_id"] = str(raw.get("agent_id") or "")[:160]
+    data["cwd"] = str(raw.get("cwd") or data["cwd"])[:400]
+    data["remote"] = str(raw.get("remote") or "")[:400]
+    data["last_summary"] = str(raw.get("last_summary") or "")[:800]
+    return data
+
+
 def _memory_blank() -> dict:
     return {
         "profile": {"name": "Ranjith", "notes": []},
         "sessions": {},
         "apps": [],
         "front": "",
+        "office": _office_blank(),
     }
 
 
@@ -1010,6 +1719,7 @@ def _memory_load() -> dict:
         apps = loaded.get("apps") if isinstance(loaded.get("apps"), list) else []
         data["apps"] = [app for app in apps if isinstance(app, dict)][:4]
         data["front"] = str(loaded.get("front") or "")
+        data["office"] = _office_clean(loaded.get("office"))
     _MEMORY = data
     if data["apps"]:
         phone = _state("phone")
@@ -1031,6 +1741,19 @@ def _memory_save() -> None:
         tmp = path + ".tmp"
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            disk = {}
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    loaded = json.loads(handle.read())
+                if isinstance(loaded, dict):
+                    disk = loaded
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                disk = {}
+            ours = _office_clean(data.get("office"))
+            theirs = _office_clean(disk.get("office"))
+            merged = dict(theirs)
+            merged.update({key: value for key, value in ours.items() if value})
+            data["office"] = merged
             with open(tmp, "w", encoding="utf-8") as handle:
                 json.dump(data, handle, ensure_ascii=False)
             os.replace(tmp, path)
@@ -1039,48 +1762,116 @@ def _memory_save() -> None:
 
 
 def _memory_notes() -> list:
-    notes = _memory_load()["profile"].get("notes") or []
-    return [str(note) for note in notes if str(note).strip()]
+    notes = mind_store.person_notes()
+    if notes:
+        return notes
+    stored = _memory_load()["profile"].get("notes") or []
+    return [str(note) for note in stored if str(note).strip()]
 
 
 def _memory_add_note(note: str) -> str:
-    note = (note or "").strip(" .")[:400]
-    if not note:
-        return "What should I remember?"
+    spoken = mind_store.remember(note)
     data = _memory_load()
-    notes = [item for item in (data["profile"].get("notes") or []) if str(item).lower() != note.lower()]
-    notes.append(note)
+    notes = mind_store.person_notes()
     data["profile"]["notes"] = notes[-12:]
     _memory_save()
-    return "I'll remember that."
+    return spoken
 
 
 def _memory_forget(needle: str) -> str:
+    spoken = mind_store.forget(needle)
     data = _memory_load()
-    notes = list(data["profile"].get("notes") or [])
-    if not notes:
-        return "I don't have a note to drop."
-    needle = (needle or "").strip(" .").lower()
-    if not needle or needle in {"that", "it", "this"}:
-        dropped = notes.pop()
-        data["profile"]["notes"] = notes
-        _memory_save()
-        return f"Forgot: {dropped}"
-    kept = [item for item in notes if needle not in str(item).lower()]
-    if len(kept) == len(notes):
-        return "I don't have a matching note."
-    data["profile"]["notes"] = kept
+    data["profile"]["notes"] = mind_store.person_notes()[-12:]
     _memory_save()
-    return "Forgot it."
+    return spoken
 
 
 def _memory_speak() -> str:
+    spoken = mind_store.speak_who()
+    if spoken:
+        return spoken
     data = _memory_load()
     name = data["profile"].get("name") or "Ranjith"
     notes = _memory_notes()
     if not notes:
         return f"You're {name}. I don't have extra notes yet."
     return f"You're {name}. " + " ".join(notes[:6])
+
+
+def _mind_record(text: str, session: str, result: dict) -> dict:
+    if not isinstance(result, dict):
+        return result
+    try:
+        mind_store.seed()
+        spoken = str(result.get("spoken") or "")
+        tools = [
+            step.get("tool")
+            for step in (result.get("steps_run") or [])
+            if isinstance(step, dict) and step.get("tool")
+        ]
+        sid = session or "desk"
+        mind_store.chat_append(sid, "user", text)
+        mind_store.chat_append(sid, "assistant", spoken)
+        mind_store.after_turn(text, spoken, sid, tools)
+        snippet = f"User ({sid}): {str(text)[:300]}\nMarc: {spoken[:300]}"
+        if str(text).strip() or spoken.strip():
+            cognee_bridge.remember_async(snippet, dataset="personal")
+        run_steps = [
+            step for step in (result.get("steps_run") or [])
+            if isinstance(step, dict) and step.get("tool")
+        ]
+        if run_steps:
+            trail = ", ".join(
+                f"{step.get('device') or '?'}:{step.get('tool')}"
+                + ("" if step.get("ok", True) else "!fail")
+                for step in run_steps[:8]
+            )
+            cognee_bridge.remember_async(
+                f"Action ({sid}): {str(text)[:200]} → {trail} → {spoken[:200]}",
+                dataset="actions",
+            )
+        history = _CHAT.setdefault(sid, [])
+        if text:
+            history.append({"role": "user", "content": str(text)[:400]})
+        if spoken:
+            history.append({"role": "assistant", "content": spoken[:400]})
+        del history[:-8]
+        _memory_save()
+    except Exception as exc:  # noqa: BLE001
+        print("[marc-api] mind skip", exc, flush=True)
+    return result
+
+
+def handle_mind_get(query: dict | None = None) -> dict:
+    query = query or {}
+    rel = ""
+    raw = query.get("path")
+    if isinstance(raw, list) and raw:
+        rel = str(raw[0] or "")
+    elif raw:
+        rel = str(raw)
+    if rel:
+        return mind_store.read_note(rel)
+    return mind_store.snapshot()
+
+
+def handle_mind_post(data: dict | None) -> dict:
+    data = data if isinstance(data, dict) else {}
+    action = str(data.get("action") or "").strip().lower()
+    try:
+        mind_store.seed()
+        if action == "focus":
+            spoken = mind_store.set_focus(str(data.get("text") or data.get("focus") or ""))
+            return {"ok": True, "spoken": spoken, **mind_store.snapshot()}
+        if action == "note":
+            spoken = mind_store.write_note(str(data.get("title") or ""), str(data.get("body") or data.get("text") or ""))
+            return {"ok": True, "spoken": spoken, **mind_store.snapshot()}
+        if action == "search":
+            spoken = mind_store.recall(str(data.get("query") or data.get("text") or ""))
+            return {"ok": True, "spoken": spoken, **mind_store.snapshot()}
+        return mind_store.snapshot()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:180]}
 
 
 def _context_line(session: str) -> str:
@@ -1175,19 +1966,46 @@ def _log_miss(text: str, step: dict) -> None:
         return
 
 
-def _assign_devices(steps: list, text: str, session: str, target: str = "auto") -> list:
-    """Default to the session device. Named phrases and an explicit target win."""
-    import re
+def _clause_for_token(text: str, token: str) -> str:
+    """Find the clause that mentions token so per-clause device phrases win."""
+    raw = text or ""
+    parts = re.split(
+        r"\s*(?:,\s*|\s+and(?:\s+then)?\s+|\s+then\s+|\s+after\s+that\s+|\s+also\s+|\s*;\s*)\s*",
+        raw,
+        flags=re.I,
+    )
+    parts = [part.strip(" .") for part in parts if part and part.strip(" .")]
+    needle = (token or "").strip().lower()
+    if needle:
+        for part in parts:
+            if needle in part.lower():
+                return part
+    return raw
 
+
+def _device_in_clause(clause: str, default: str) -> str:
+    if _laptop_named(clause):
+        return "laptop"
+    if _phone_named(clause):
+        return "phone"
+    if _server_named(clause) or re.search(r"\b(?:server|docker|containers?)\b", clause or "", re.I):
+        return "server"
+    return default
+
+
+def _assign_devices(steps: list, text: str, session: str, target: str = "auto") -> list:
+    """Per-clause device phrases win. Dual tools (open_app) keep Hermes device when sane."""
     low = text.lower()
     dest = _session_target(text, session, target)
     prefer_phone = dest == "phone"
+    multi = _multi_phrase(text)
     routed = []
     for step in steps:
         args = dict(step.get("args") or {})
         tool = step.get("tool") or ""
-        device = step.get("device")
-        if prefer_phone and tool in {"youtube_media", "volume_media", "play_video", "play_nth"}:
+        planned = str(step.get("device") or "").strip().lower()
+        device = planned if planned in {"phone", "laptop", "server"} else ""
+        if prefer_phone and not multi and tool in {"youtube_media", "volume_media", "play_video", "play_nth"}:
             action = str(args.get("action") or "play")
             if re.search(r"\bnext\b", low):
                 action = "next"
@@ -1200,35 +2018,236 @@ def _assign_devices(steps: list, text: str, session: str, target: str = "auto") 
             tool = "media_key"
             device = "phone"
             args = {"action": action}
+        if prefer_phone and not multi and tool in {"youtube_search", "google_search", "web_search"}:
+            query = str(args.get("query") or "").strip()
+            app = "YouTube" if tool == "youtube_search" or "youtube" in low else "Google"
+            already = any(
+                row.get("tool") == "open_app"
+                and app.lower() in str((row.get("args") or {}).get("name") or "").lower()
+                for row in routed
+            )
+            if not already:
+                routed.append({"device": "phone", "tool": "open_app", "args": {"name": app}})
+            if query:
+                routed.append({"device": "phone", "tool": "type_into", "args": {"text": query, "send": True}})
+            continue
         if tool in {"open_app", "close_app"}:
             name = str(args.get("name") or args.get("app") or "").strip()
             name = re.sub(
-                r"\s+on\s+(?:my\s+|the\s+)?(?:phone|mobile|laptop|computer|pc)$",
+                r"\s+on\s+(?:my\s+|the\s+)?(?:phone|mobile|laptop|computer|pc|server|linux)$",
                 "",
                 name,
                 flags=re.I,
             ).strip(" .")
-            if prefer_phone:
-                device = "phone"
-                args["name"] = name
+            clause = _clause_for_token(text, name)
+            device = _device_in_clause(clause, device or dest)
+            if device == "phone":
+                args = {"name": name}
             else:
+                args = {"app": name}
+        elif tool in SERVER_TOOLS or tool in MIND_TOOLS:
+            device = "server"
+        elif tool in {"type_into", "type_text"}:
+            # Keep typing on the named/target device. Muse often emits phone type_into for laptop.
+            body = str(args.get("text") or "").strip()
+            body = re.sub(r"^(?:type|write|dictate)\s+", "", body, flags=re.I).strip()
+            # "Open WhatsApp and text Name …" must become whatsapp_send, not type_into into search.
+            if (
+                tool == "type_into"
+                and "whatsapp" in low
+                and re.search(r"\b(?:text|message)\b", low)
+                and not (_laptop_named(text) or dest == "laptop" or target == "laptop")
+            ):
+                contact, msg = _contact_and_body(text, session)
+                if not contact and body:
+                    words = body.split()
+                    contact = words[0] if words else ""
+                    msg = " ".join(words[1:]) if len(words) > 1 else ""
+                if contact:
+                    tool = "whatsapp_send"
+                    device = "phone"
+                    send = bool(args.get("send")) and not re.search(
+                        r"\b(?:don'?t|do not|dont)\s+send\b", text, re.I
+                    )
+                    args = {"contact": contact, "text": msg, "send": send}
+                    routed.append({**step, "device": device, "tool": tool, "args": args})
+                    continue
+            clause = _clause_for_token(text, body.split(" ", 1)[0] if body else "type")
+            if _laptop_named(text) or dest == "laptop" or target == "laptop":
+                if not _phone_named(clause):
+                    device = "laptop"
+                    tool = "type_text"
+                    args = {"text": body}
+            elif _phone_named(clause) or dest == "phone":
+                device = "phone"
+                tool = "type_into"
+                send = bool(args.get("send")) and not re.search(
+                    r"\b(?:don'?t|do not|dont)\s+send\b", text, re.I
+                )
+                args = {"text": body, "send": send}
+            else:
+                device = device or dest or ("phone" if prefer_phone else "laptop")
+                if device == "laptop":
+                    tool = "type_text"
+                    args = {"text": body}
+                else:
+                    tool = "type_into"
+                    args = {"text": body, "send": bool(args.get("send"))}
+        elif tool in {"whatsapp_send", "whatsapp_prefill", "sms_send", "instagram_send"}:
+            # Stay on the device the user named for the chat app — don't bounce laptop→phone.
+            contact = str(args.get("contact") or args.get("phone") or args.get("to") or "").strip()
+            if contact:
+                args["contact"] = contact
+            clause = _clause_for_token(text, contact or "whatsapp")
+            if _laptop_named(text) and not _phone_named(clause):
                 device = "laptop"
-                args["app"] = name
-                args.pop("name", None)
-        elif tool in PHONE_TOOLS:
+            elif _phone_named(clause) or _phone_named(text):
+                device = "phone"
+            elif dest == "laptop":
+                device = "laptop"
+            else:
+                device = "phone"
+            # Empty-slot fill only — never overwrite Muse's chosen contact.
+            contact_fill, body_fill = _contact_and_body(text, session)
+            if not contact and contact_fill:
+                args["contact"] = contact_fill
+            if not str(args.get("text") or "").strip() and body_fill:
+                args["text"] = body_fill
+            if "send" not in args:
+                args["send"] = bool(re.search(r"\bsend\b", text, re.I)) and not re.search(
+                    r"\b(?:don'?t|do not|dont)\s+send\b", text, re.I
+                )
+        elif tool in PHONE_TOOLS and tool not in LAPTOP_TOOLS:
             device = "phone"
-        elif tool in SERVER_TOOLS:
-            device = "server"
-        elif tool in LAPTOP_TOOLS:
+        elif tool in LAPTOP_TOOLS and tool not in PHONE_TOOLS:
             device = "laptop"
-        elif dest == "server":
-            device = "server"
-        elif prefer_phone:
-            device = "phone"
         else:
-            device = "laptop"
+            # Dual tools: honor Hermes device, else clause/default.
+            if not device:
+                device = dest if dest in {"phone", "laptop", "server"} else ("phone" if prefer_phone else "laptop")
+            if multi:
+                hint = _clause_for_token(text, str(args.get("name") or args.get("app") or args.get("query") or tool))
+                device = _device_in_clause(hint, device)
         routed.append({**step, "device": device, "tool": tool, "args": args})
-    return routed
+    return _expand_laptop_messaging(routed, text)
+
+
+def _expand_laptop_messaging(steps: list, text: str) -> list:
+    """Laptop has no whatsapp_send tool — turn it into open + type + enter."""
+    out: list[dict] = []
+    for step in steps:
+        tool = step.get("tool") or ""
+        device = step.get("device") or ""
+        args = dict(step.get("args") or {})
+        if device == "laptop" and tool in {"whatsapp_send", "whatsapp_prefill"}:
+            contact = str(args.get("contact") or args.get("phone") or "").strip()
+            body = str(args.get("text") or "").strip()
+            app = "WhatsApp"
+            already = any(
+                row.get("device") == "laptop"
+                and row.get("tool") == "open_app"
+                and "whatsapp" in str((row.get("args") or {}).get("app") or "").lower()
+                for row in out
+            )
+            if not already:
+                out.append({"device": "laptop", "tool": "open_app", "args": {"app": app}})
+            if contact:
+                out.append({"device": "laptop", "tool": "type_text", "args": {"text": contact}})
+                out.append({"device": "laptop", "tool": "hotkey", "args": {"action": "enter"}})
+            if body:
+                out.append({"device": "laptop", "tool": "type_text", "args": {"text": body}})
+            continue
+        out.append({**step, "args": args})
+    return out
+
+
+def _typed_body(raw: str) -> tuple[str, bool]:
+    import re
+
+    send = bool(re.search(r"\b(?:enter|send(?:\s+it)?)\b", raw, re.I))
+    body = re.sub(
+        r"\s+(?:and\s+)?(?:then\s+)?(?:hit |press )?(?:enter(?:\s+and)?\s*)?(?:send(?:\s+it)?)?$",
+        "",
+        raw.strip(" ."),
+        flags=re.I,
+    )
+    body = re.sub(r"\s+enter$", "", body, flags=re.I).strip(" .")
+    return body, send
+
+
+def _scripted_plan(text: str, session: str = "", target: str = "auto") -> dict | None:
+    """Open / type / search / send on the session device. Do not wait on Needle."""
+    import re
+
+    if not text.strip():
+        return None
+    dest = _session_target(text, session, target)
+    phone = dest == "phone"
+    low = text.lower()
+    if re.search(r"\b(?:whatsapp|instagram|sms)\b", low):
+        return None
+
+    youtube = re.search(
+        r"\b(?:search\s+(?:on\s+)?youtube\s+(?:for\s+)?|youtube\s+(?:search\s+)?(?:for\s+)?)(.+)$",
+        text,
+        re.I,
+    ) or re.search(r"\b(?:search|play|find)\s+(.+?)\s+on\s+youtube\b", text, re.I)
+    if youtube:
+        query = youtube.group(1).strip(" .")
+        query = re.sub(r"^(?:for|search\s+for)\s+", "", query, flags=re.I).strip(" .")
+        if query:
+            if phone:
+                steps = [
+                    {"device": "phone", "tool": "open_app", "args": {"name": "YouTube"}},
+                    {"device": "phone", "tool": "type_into", "args": {"text": query, "send": True}},
+                ]
+            else:
+                steps = [{"device": "laptop", "tool": "youtube_search", "args": {"query": query}}]
+            print("[marc-api] scripted", [step.get("tool") for step in steps], flush=True)
+            return {"reply": _brief_reply(steps, ""), "steps": steps}
+
+    google = re.search(
+        r"\b(?:open\s+)?google\s+and\s+search(?:\s+for)?\s+(.+)$",
+        text,
+        re.I,
+    ) or re.search(r"\bsearch(?:\s+on)?\s+google\s+(?:for\s+)?(.+)$", text, re.I)
+    if google:
+        query = google.group(1).strip(" .")
+        if query:
+            if phone:
+                steps = [
+                    {"device": "phone", "tool": "open_app", "args": {"name": "Google"}},
+                    {"device": "phone", "tool": "type_into", "args": {"text": query, "send": True}},
+                ]
+            else:
+                steps = [{"device": "laptop", "tool": "google_search", "args": {"query": query}}]
+            print("[marc-api] scripted", [step.get("tool") for step in steps], flush=True)
+            return {"reply": _brief_reply(steps, ""), "steps": steps}
+
+    typed = re.search(
+        r"\b(?:open|launch|start)\s+(.+?)\s+(?:and\s+)?(?:then\s+)?(?:type|enter|write)\s+(?:in\s+)?(.+)$",
+        text,
+        re.I,
+    )
+    if typed:
+        app = typed.group(1).strip(" .")
+        body, send = _typed_body(typed.group(2))
+        if app and body:
+            if phone:
+                steps = [
+                    {"device": "phone", "tool": "open_app", "args": {"name": app}},
+                    {"device": "phone", "tool": "type_into", "args": {"text": body, "send": send}},
+                ]
+            else:
+                steps = [
+                    {"device": "laptop", "tool": "open_app", "args": {"app": app}},
+                    {"device": "laptop", "tool": "type_text", "args": {"text": body}},
+                ]
+                if send:
+                    steps.append({"device": "laptop", "tool": "hotkey", "args": {"key": "enter"}})
+            print("[marc-api] scripted", [step.get("tool") for step in steps], flush=True)
+            return {"reply": _brief_reply(steps, ""), "steps": steps}
+    return None
 
 
 def _open_sequence(text: str) -> list:
@@ -1247,8 +2266,45 @@ def _open_sequence(text: str) -> list:
     return steps[:6]
 
 
+def _ensure_type_target(steps: list) -> list:
+    """After laptop open_app, force focus + stamp type_text with that app so keys don't hit the old window."""
+    out: list[dict] = []
+    last_app = ""
+    for step in steps or []:
+        if not isinstance(step, dict):
+            continue
+        row = {**step, "args": dict(step.get("args") or {})}
+        tool = row.get("tool") or ""
+        device = str(row.get("device") or "").strip().lower()
+        args = row["args"]
+        if device == "laptop" and tool == "open_app":
+            last_app = str(args.get("app") or args.get("name") or "").strip()
+            out.append(row)
+            continue
+        if device == "laptop" and tool == "focus_window":
+            last_app = str(args.get("app") or args.get("name") or last_app).strip() or last_app
+            out.append(row)
+            continue
+        if device == "laptop" and tool == "type_text":
+            app = str(args.get("app") or args.get("into") or args.get("window") or last_app).strip()
+            if app:
+                args["app"] = app
+                last_app = app
+                if not out or out[-1].get("tool") != "focus_window" or str(
+                    (out[-1].get("args") or {}).get("app") or ""
+                ).lower() != app.lower():
+                    out.append({"device": "laptop", "tool": "focus_window", "args": {"app": app}})
+            out.append({**row, "args": args})
+            continue
+        out.append(row)
+    return out
+
+
 def _finish_plan(text: str, session: str, plan: dict, target: str = "auto") -> dict:
-    steps = _assign_devices(plan.get("steps") or [], text, session, target)
+    raw_steps = plan.get("steps") or []
+    if isinstance(raw_steps, list):
+        raw_steps = _fill_slots(text, [dict(step) if isinstance(step, dict) else step for step in raw_steps])
+    steps = _ensure_type_target(_assign_devices(raw_steps, text, session, target))
     opened = _assign_devices(_open_sequence(text), text, session, target)
     if len(opened) >= 2:
         planned = [step for step in steps if step.get("tool") in {"open_app", "close_app"}]
@@ -1266,6 +2322,8 @@ def _finish_plan(text: str, session: str, plan: dict, target: str = "auto") -> d
             "apps": apps,
             "machines": [],
             "steps_run": [],
+            "planner": plan.get("planner") or PLANNER,
+            "source": plan.get("source") or "",
         }
         _remember_run(result)
         return result
@@ -1290,6 +2348,8 @@ def _instant(text: str) -> str | None:
         r"\b(today's date|todays date)\b", low
     ):
         return time.strftime("%A, %-d %B")
+    if re.search(r"\b(what was i doing|where did we leave off|where we left off|catch me up|what's going on|whats going on)\b", low):
+        return mind_store.now_speak()
     remembered = re.match(r"^(?:please\s+)?remember(?:\s+that)?\s+(.+)$", text.strip(), re.I)
     if remembered:
         return _memory_add_note(remembered.group(1))
@@ -1298,7 +2358,32 @@ def _instant(text: str) -> str | None:
         return _memory_forget(forgot.group(1) or "")
     if re.search(r"\b(who am i|what do you remember|what do you know about me)\b", low):
         return _memory_speak()
+    if re.search(r"\b(?:what'?s|whats|what is)\s+(?:the\s+|my\s+)?ip(?:\s+address)?\b", low) or low in {
+        "ip",
+        "ip address",
+        "whats ip",
+        "what's ip",
+    }:
+        return _ip_speak()
     return None
+
+
+def _ip_speak() -> str:
+    addrs = []
+    try:
+        addrs.extend(subprocess.check_output(["tailscale", "ip", "-4"], text=True, timeout=2).split())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        for item in subprocess.check_output(["hostname", "-I"], text=True, timeout=2).split():
+            if item not in addrs:
+                addrs.append(item)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    shown = [item for item in addrs if item and not item.startswith("127.")][:3]
+    if not shown:
+        return "I couldn't read the IP."
+    return "IP " + ", ".join(shown) + "."
 
 
 def _media_followup(text: str) -> str | None:
@@ -1321,11 +2406,17 @@ def _media_followup(text: str) -> str | None:
 def _contact_and_body(text: str, session: str) -> tuple[str, str]:
     import re
 
-    said = re.search(r"\b(?:that|saying)\s+(.+)$", text, re.I)
+    stop = {
+        "hi", "hello", "hey", "this", "that", "please", "regarding", "about", "saying",
+        "ill", "i'll", "im", "i'm", "i", "be", "late", "home", "out", "for", "dinner",
+        "the", "a", "an", "on", "in", "to", "and", "then",
+    }
+    said = re.search(r"\b(?:that|saying|regarding|about)\s+(.+)$", text, re.I)
     if said:
         body = said.group(1).strip(" .")
         who = re.search(
-            r"\b(?:send|text|message|whatsapp|instagram)\s+(.+?)\s+(?:on\s+\w+\s+)?(?:that|saying)\b",
+            r"\b(?:send|text|message|whatsapp|instagram)\s+(.+?)\s+"
+            r"(?:on\s+\w+\s+)?(?:that|saying|regarding|about)\b",
             text,
             re.I,
         )
@@ -1333,13 +2424,19 @@ def _contact_and_body(text: str, session: str) -> tuple[str, str]:
     else:
         chunk = re.search(r"\b(?:text|message)\s+(.+)$", text, re.I)
         if not chunk:
+            # "Open WhatsApp … and text Ranjith …"
+            chunk = re.search(r"\b(?:text|message)\s+([A-Za-z][\w .'-]{0,40})$", text, re.I)
+        if not chunk:
             return "", ""
         words = chunk.group(1).strip(" .").split()
-        stop = {"hi", "hello", "hey", "this", "that", "please"}
         who_words = []
         index = 0
-        while index < len(words) and index < 3 and words[index].lower().strip(".,") not in stop:
-            who_words.append(words[index].strip(".,"))
+        # One or two name tokens only — never swallow the message body.
+        while index < len(words) and index < 2 and words[index].lower().strip(".,") not in stop:
+            token = words[index].strip(".,")
+            if not token or not re.match(r"^[A-Za-z]", token):
+                break
+            who_words.append(token)
             index += 1
         contact = " ".join(who_words)
         body = " ".join(words[index:])
@@ -1350,7 +2447,14 @@ def _contact_and_body(text: str, session: str) -> tuple[str, str]:
     if contact.lower() in {"him", "her", "them", "to"}:
         contact = str(_state(session).get("contact") or "")
     contact = re.sub(r"^(?:to|on)\s+", "", contact, flags=re.I).strip()
-    contact = re.sub(r"\s+on\s+(?:whatsapp|instagram|messages)$", "", contact, flags=re.I).strip()
+    contact = re.sub(r"\s+on\s+(?:whatsapp|instagram|messages|laptop|phone)$", "", contact, flags=re.I).strip()
+    # Strip trailing device phrases stuck to the name.
+    contact = re.sub(
+        r"\s+on\s+(?:my\s+|the\s+)?(?:laptop|computer|pc|phone|mobile)$",
+        "",
+        contact,
+        flags=re.I,
+    ).strip()
     if body.lower() in {"this", "that", "it"}:
         body = str(_state(session).get("last_utterance") or "").strip()
     return contact, body
@@ -1455,17 +2559,19 @@ def _handle_phone(text: str, session: str, target: str = "auto") -> dict:
     if follow is not None:
         print("[marc-api] phone", [step.get("tool") for step in follow["steps"]], flush=True)
         result = _finish_plan(text, session, follow, target)
+    elif (scripted := _scripted_plan(text, session, target)) is not None:
+        result = _finish_plan(text, session, scripted, target)
     elif _multi_phrase(text):
-        print("[marc-api] qwen-seq", flush=True)
-        result = _finish_plan(text, session, plan_with_qwen(text, context=_context_line(session)), target)
+        print("[marc-api] needle-seq", flush=True)
+        result = _finish_plan(text, session, plan_command(text, context=_context_line(session), session=session), target)
     else:
         steps = _assign_devices(_obvious_steps(text, _fallback_steps(text)), text, session, target)
         if len(steps) == 1 and (steps[0].get("device") == "phone" or steps[0].get("tool") in PHONE_TOOLS):
             print("[marc-api] fast", [step.get("tool") for step in steps], flush=True)
             result = _finish_plan(text, session, {"reply": _brief_reply(steps, ""), "steps": steps}, target)
         else:
-            print("[marc-api] qwen-seq", flush=True)
-            result = _finish_plan(text, session, plan_with_qwen(text, context=_context_line(session)), target)
+            print("[marc-api] needle-seq", flush=True)
+            result = _finish_plan(text, session, plan_command(text, context=_context_line(session), session=session), target)
     _state(session)["last_utterance"] = text
     return result
 
@@ -1787,37 +2893,74 @@ def handle_utterance(body: dict) -> dict:
     dest = _session_target(text, session, target)
     if not text:
         return _empty_reply("I didn't catch that.")
+    global _LAST_RUN
+    run = _activity_start(text, session)
+    run["phase"] = "planning"
+    _activity_event(run, "planning", PLANNER)
+    _LAST_RUN = {
+        "spoken": "",
+        "machines": [],
+        "steps_run": [],
+        "planner": PLANNER,
+        "source": "",
+        "run_id": run["id"],
+        "phase": "planning",
+        "text": text,
+        "at": int(time.time() * 1000),
+    }
+    try:
+        result = _utterance_body(text, session, target, dest, body)
+    except Exception:
+        run["phase"] = "fail"
+        _activity_event(run, "fail", "planner error")
+        raise
+    return _activity_attach(result, run)
+
+
+def _utterance_body(text: str, session: str, target: str, dest: str, body: dict) -> dict:
     _memory_load()
     quick = _instant(text)
     if quick:
         print("[marc-api] instant", flush=True)
         apps = list(_state(session)["apps"]) if session == "phone" else []
-        return _empty_reply(quick, apps=apps)
-    import re as _re
-    if _re.search(r"\b(reboot|shutdown|halt|poweroff)\b", text, _re.I):
-        return _empty_reply("I won't reboot or shut down.")
-    if _re.search(r"rm\s+-rf\s+/", text, _re.I):
-        return _empty_reply("I won't run that.")
-    server = _direct_server(text, session, target)
-    if server is not None:
-        return server
+        return _empty_reply(quick, apps=apps, source="instant", planner="local")
+    if re.search(r"\b(reboot|shutdown|halt|poweroff)\b", text, re.I):
+        return _empty_reply("I won't reboot or shut down.", source="guard", planner="local")
+    if re.search(r"rm\s+-rf\s+/", text, re.I):
+        return _empty_reply("I won't run that.", source="guard", planner="local")
     if session == "phone":
         _state(session)["last_utterance"] = text
+
+    # Hermes + Cognee RAG owns phone/laptop/server actions (including continuous chains).
+    if PLANNER in ("hermes", "muse", "meta"):
+        if _looks_like_action(text) or _multi_phrase(text) or _wants_agent(text) or target in {
+            "phone", "laptop", "server",
+        } or dest in {"phone", "laptop", "server"}:
+            return _hermes_rag_plan(text, session, target)
+        # Pure chat still gets brain context through Hermes so mind stays linked.
+        return _hermes_rag_plan(text, session, target)
+
+    server = _direct_server(text, session, target)
+    if server is not None:
+        return {**server, "planner": server.get("planner") or "direct", "source": server.get("source") or "direct"}
     direct = _direct_command(text, session, target)
     if direct is not None:
-        return direct
+        return {**direct, "planner": "direct", "source": "direct"}
+    scripted = _scripted_plan(text, session, target)
+    if scripted is not None:
+        return _finish_plan(text, session, {**scripted, "source": scripted.get("source") or "scripted"}, target)
     if dest == "phone" and session == "phone" and not _wants_agent(text):
         return _handle_phone(text, session, target)
     if _multi_phrase(text) and not _wants_agent(text):
-        print("[marc-api] qwen-seq", flush=True)
-        return _finish_plan(text, session, plan_with_qwen(text, context=_context_line(session)), target)
+        print("[marc-api] needle-seq", flush=True)
+        return _finish_plan(text, session, plan_command(text, context=_plan_context(text, session), session=session), target)
     steps = _assign_devices(_obvious_steps(text, _fallback_steps(text)), text, session, target)
     if len(steps) > 1 and not _wants_agent(text):
-        print("[marc-api] qwen-seq", flush=True)
-        return _finish_plan(text, session, plan_with_qwen(text, context=_context_line(session)), target)
+        print("[marc-api] needle-seq", flush=True)
+        return _finish_plan(text, session, plan_command(text, context=_plan_context(text, session), session=session), target)
     if len(steps) == 1 and not _wants_agent(text):
         print("[marc-api] fast", [step.get("tool") for step in steps], flush=True)
-        plan = {"reply": _brief_reply(steps, ""), "steps": steps}
+        plan = {"reply": _brief_reply(steps, ""), "steps": steps, "source": "heuristic"}
         return gate_steps(text, plan, allow_retry=False)
     if LAPTOP_URL and dest == "laptop" and session != "phone" and not _wants_agent(text):
         try:
@@ -1836,69 +2979,26 @@ def handle_utterance(body: dict) -> dict:
                     "ok": bool(ruled.get("ok", True)),
                     "message": ruled.get("message") or ruled.get("spoken") or "",
                 }],
+                "planner": PLANNER,
+                "source": "laptop-rule",
             }
             _remember_run(result)
             return result
-    scored = None if _wants_agent(text) else _classify_laya(text)
+    scored = None if PLANNER == "needle" or _wants_agent(text) else _classify_laya(text)
     if scored is not None and not _wants_agent(text, scored):
         laya_steps = _steps_from_laya(text, scored)
         if laya_steps:
             laya_steps = _assign_devices(laya_steps, text, session, target)
             print("[marc-api] laya-step", [step.get("tool") for step in laya_steps], flush=True)
-            plan = {"reply": _brief_reply(laya_steps, ""), "steps": laya_steps}
+            plan = {"reply": _brief_reply(laya_steps, ""), "steps": laya_steps, "source": "laya"}
             return gate_steps(text, plan, allow_retry=False)
-    if _wants_agent(text, scored):
-        looped = run_agent_loop(text, session, target)
-        if looped is not None:
-            return looped
-    return _finish_plan(text, session, plan_with_qwen(text, context=_context_line(session)), target)
+    return _finish_plan(text, session, plan_command(text, context=_plan_context(text, session), session=session), target)
 
 
 def handle_chat(body: dict) -> dict:
-    import re
-
-    text = (body.get("text") or "").strip()
     session = str(body.get("session_id") or "desk")
-    if not text:
-        return _empty_reply("I didn't catch that.")
-    _memory_load()
-    quick = _instant(text)
-    if quick:
-        print("[marc-api] instant", flush=True)
-        return _empty_reply(quick)
-    if re.search(ACTION_RE, text, re.I):
-        return handle_utterance(body)
-    history = _CHAT.setdefault(session or "desk", [])
-    messages = [{"role": "system", "content": CHAT_SYSTEM}]
-    ctx = _context_line(session)
-    if ctx:
-        messages.append({"role": "system", "content": ctx})
-    messages.extend(history[-6:])
-    messages.append({"role": "user", "content": text})
-    try:
-        data = _post(
-            OLLAMA_URL,
-            {
-                "model": OLLAMA_MODEL,
-                "stream": False,
-                "messages": messages,
-                "keep_alive": "30m",
-                "options": {"temperature": 0.4, "num_predict": 120, "num_ctx": 1024},
-            },
-            timeout=90,
-        )
-        reply = str(((data.get("message") or {}).get("content")) or "").strip()
-    except Exception as exc:  # noqa: BLE001
-        print("[marc-api] chat fail", exc, flush=True)
-        return _empty_reply("I need a connection for that.")
-    if not reply:
-        reply = "I didn't catch that."
-    history.append({"role": "user", "content": text})
-    history.append({"role": "assistant", "content": reply})
-    del history[:-8]
-    _memory_save()
-    print("[marc-api] chat", flush=True)
-    return _empty_reply(reply)
+    print("[marc-api] chat-needle", flush=True)
+    return handle_utterance({**body, "session_id": session})
 
 
 def handle_confirm(body: dict) -> dict:
@@ -2353,6 +3453,9 @@ def machine_status() -> dict:
         load_parts = handle.read().split()
     with open("/proc/uptime", encoding="utf-8") as handle:
         uptime = float(handle.read().split()[0])
+    hermes = hermes_client.health()
+    brain = cognee_bridge.health()
+    meta = muse_client.health()
     return {
         "ok": True,
         "uptime_s": int(uptime),
@@ -2369,6 +3472,10 @@ def machine_status() -> dict:
         "net": _throughput(),
         "procs": _processes(),
         "services": _services(),
+        "planner": PLANNER,
+        "hermes": hermes,
+        "cognee": brain,
+        "meta_ai": {"ok": bool(meta.get("keyed")), "base": meta.get("base"), "spark": meta.get("spark")},
         "laptop": _laptop_health(),
         "agent": dict(_LAST_RUN),
         "phone": {
@@ -2377,6 +3484,109 @@ def machine_status() -> dict:
             "last_utterance": str(_state("phone").get("last_utterance") or ""),
         },
     }
+
+
+def _office_down(spoken: str) -> dict:
+    mem = _memory_load().get("office") or _office_blank()
+    return {
+        "ok": False,
+        "state": "down",
+        "agent_id": mem.get("agent_id") or "",
+        "cwd": mem.get("cwd") or "/home/rox/office/work",
+        "remote": mem.get("remote") or "",
+        "reachable": False,
+        "summary": mem.get("last_summary") or "",
+        "spoken": spoken,
+        "hops": [],
+    }
+
+
+def _office_remember(payload: dict) -> None:
+    if not isinstance(payload, dict):
+        return
+    mem = _memory_load()
+    office = _office_clean(mem.get("office"))
+    if payload.get("agent_id"):
+        office["agent_id"] = str(payload.get("agent_id") or "")[:160]
+    if payload.get("cwd"):
+        office["cwd"] = str(payload.get("cwd") or "")[:400]
+    if payload.get("remote"):
+        office["remote"] = str(payload.get("remote") or "")[:400]
+    summary = payload.get("summary") or payload.get("last_summary")
+    if summary:
+        office["last_summary"] = str(summary)[:800]
+    mem["office"] = office
+    _memory_save()
+
+
+def _cursor_call(path: str, method: str, payload: dict | None = None, timeout: int = 8) -> dict:
+    body = None if payload is None else json.dumps(payload).encode()
+    req = urllib.request.Request(
+        CURSOR_URL + path,
+        data=body,
+        method=method,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        try:
+            data = json.loads(exc.read().decode())
+        except (json.JSONDecodeError, TypeError, ValueError, UnicodeDecodeError):
+            return _office_down("Office isn't running.")
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return _office_down("Office isn't running.")
+    if not isinstance(data, dict):
+        return _office_down("Office isn't running.")
+    _office_remember(data)
+    return data
+
+
+def handle_office(data: dict) -> dict:
+    text = str((data or {}).get("text") or (data or {}).get("prompt") or "").strip()
+    resume = bool((data or {}).get("resume", True))
+    cwd = (data or {}).get("cwd")
+    payload = {"prompt": text, "text": text, "resume": resume}
+    if cwd:
+        payload["cwd"] = str(cwd)
+    if not resume and text:
+        try:
+            mind_store.project_from_task(text)
+        except Exception as exc:  # noqa: BLE001
+            print("[marc-api] mind office skip", exc, flush=True)
+    result = _cursor_call("/run", "POST", payload)
+    if "spoken" not in result:
+        result["spoken"] = result.get("summary") or "Working on the office folder."
+    return result
+
+
+def office_status() -> dict:
+    result = _cursor_call("/status", "GET")
+    if "spoken" not in result:
+        if result.get("reachable") is False:
+            result["spoken"] = "Office machine isn't reachable."
+        else:
+            result["spoken"] = result.get("summary") or ""
+    return result
+
+
+def cancel_office() -> dict:
+    result = _cursor_call("/cancel", "POST", {})
+    if "spoken" not in result:
+        result["spoken"] = "Stopping."
+    return result
+
+
+import ytlock_store
+
+
+def handle_ytlock(data: dict, *, public: bool) -> dict:
+    return ytlock_store.handle(data or {}, public=public)
+
+
+def ytlock_get(pin: str, *, public: bool) -> dict:
+    return ytlock_store.get(pin, public=public)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2401,7 +3611,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path == "/health":
-            self._json(200, {"ok": True, "bind": BIND, "laptop": bool(LAPTOP_URL)})
+            self._json(200, {
+                "ok": True,
+                "bind": BIND,
+                "laptop": bool(LAPTOP_URL),
+                "planner": PLANNER,
+                "hermes": hermes_client.health().get("ok"),
+                "cognee": True,
+                "meta_ai": muse_client.health().get("keyed"),
+            })
             return
         if path == "/status":
             if not self._authorized():
@@ -2414,6 +3632,42 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, payload)
             except Exception as exc:  # noqa: BLE001
                 self._json(500, {"ok": False, "error": str(exc)})
+            return
+        if path == "/activity":
+            if not self._authorized():
+                self._json(401, {"ok": False, "error": "unauthorized"})
+                return
+            query = parse_qs(urlparse(self.path).query)
+            session_id = (query.get("session_id") or [""])[0]
+            since_raw = (query.get("since") or ["0"])[0]
+            try:
+                since_ms = int(since_raw or 0)
+            except ValueError:
+                since_ms = 0
+            self._json(200, activity_snapshot(session_id=session_id, since_ms=since_ms))
+            return
+        if path == "/office":
+            if not self._authorized():
+                self._json(401, {"ok": False, "error": "unauthorized"})
+                return
+            self._json(200, office_status())
+            return
+        if path == "/ytlock":
+            public = (self.headers.get("X-Ytlock-Public") or "") == "1"
+            if not public and not self._authorized():
+                self._json(401, {"ok": False, "error": "unauthorized"})
+                return
+            pin = self.headers.get("X-Ytlock-Pin") or ""
+            if "?" in (self.path or ""):
+                pin = pin or (parse_qs(urlparse(self.path).query).get("pin") or [""])[0]
+            self._json(200, ytlock_get(pin, public=public))
+            return
+        if path == "/mind":
+            if not self._authorized():
+                self._json(401, {"ok": False, "error": "unauthorized"})
+                return
+            query = parse_qs(urlparse(self.path).query)
+            self._json(200, handle_mind_get(query))
             return
         self._json(404, {"ok": False, "error": "not found"})
 
@@ -2430,12 +3684,24 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if path == "/utterance":
-                result = handle_utterance(data)
-                self._json(200, _desk(str(data.get("session_id") or ""), result))
+                session = str(data.get("session_id") or "")
+                result = _mind_record(str(data.get("text") or ""), session, handle_utterance(data))
+                self._json(200, _desk(session, result))
             elif path == "/chat":
-                self._json(200, _desk(str(data.get("session_id") or ""), handle_chat(data)))
+                session = str(data.get("session_id") or "desk")
+                result = _mind_record(str(data.get("text") or ""), session, handle_chat(data))
+                self._json(200, _desk(session, result))
+            elif path == "/mind":
+                self._json(200, handle_mind_post(data))
             elif path == "/confirm":
                 self._json(200, handle_confirm(data))
+            elif path == "/office":
+                self._json(200, handle_office(data))
+            elif path == "/office-cancel":
+                self._json(200, cancel_office())
+            elif path == "/ytlock":
+                public = (self.headers.get("X-Ytlock-Public") or "") == "1"
+                self._json(200, handle_ytlock(data, public=public))
             else:
                 self._json(404, {"ok": False, "error": "not found"})
         except urllib.error.URLError as exc:
@@ -2447,6 +3713,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    try:
+        mind_store.seed()
+    except Exception as extra:  # noqa: BLE001
+        print("[marc-api] mind seed", extra, flush=True)
+    try:
+        _ensure_needle_files()
+    except Exception as extra:  # noqa: BLE001
+        print("[marc-api] needle files", extra, flush=True)
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"[marc-api] listening on 0.0.0.0:{PORT}", flush=True)
     server.serve_forever()

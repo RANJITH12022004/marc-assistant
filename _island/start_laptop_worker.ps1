@@ -35,11 +35,30 @@ if (-not (Test-Path $tokenPath)) {
     exit 1
 }
 $env:MARC_TOKEN = (Get-Content -Raw $tokenPath).Trim()
+foreach ($pair in @(@("ytlock_url", "YTLOCK_URL"), @("ytlock_pin", "YTLOCK_PIN"), @("ytlock_device", "YTLOCK_DEVICE"))) {
+    $path = Join-Path $env:USERPROFILE (".marc\" + $pair[0])
+    if (Test-Path $path) { Set-Item -Path ("Env:" + $pair[1]) -Value (Get-Content -Raw $path).Trim() }
+}
 $env:MARC_BIND = "0.0.0.0"
 $env:MARC_WORKER_PORT = "8092"
 $env:MARC_LAPTOP_ROOT = $root
 Set-Location $root
 Write-Log "supervisor"
+$ytlog = Join-Path $env:USERPROFILE ".marc\ytlock.log"
+$hostlog = Join-Path $env:USERPROFILE ".marc\ytlock-host.log"
+$env:YTLOCK_BIND = "127.0.0.1"
+$env:YTLOCK_PORT = "8093"
+if (-not $env:YTLOCK_URL) { $env:YTLOCK_URL = "http://127.0.0.1:8093" }
+
+function Test-CommandLine($pattern) {
+    try {
+        $hit = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine -match $pattern }
+        return [bool]$hit
+    } catch {
+        return $false
+    }
+}
 
 while ($true) {
     if (Test-Worker) {

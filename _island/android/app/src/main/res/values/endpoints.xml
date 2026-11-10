@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="pi_base_url" translatable="false">http://100.112.164.77:8090</string>
+    <string name="marc_token" translatable="false">d0052b8a496d413341468e3d7b782224e5487e5299465c7e</string>
+</resources>

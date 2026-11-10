@@ -1,0 +1,17 @@
+[Unit]
+Description=Marc Needle planner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rox
+WorkingDirectory=/home/rox/marc
+Environment=NEEDLE_TELEMETRY=0
+Environment=DO_NOT_TRACK=1
+ExecStart=/home/rox/marc/needle-runtime/needle --model /home/rox/marc/needle-runtime/needle3.cact --tools /home/rox/marc/needle_tools.json --system /home/rox/marc/needle_system.txt --serve --port 8094
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

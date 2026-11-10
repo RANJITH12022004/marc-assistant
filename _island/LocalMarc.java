@@ -76,6 +76,10 @@ final class LocalMarc {
         if (typed != null) {
             return typed;
         }
+        Plan scripted = scripted(raw, low);
+        if (scripted != null) {
+            return scripted;
+        }
         Plan song = namedSong(raw, low);
         if (song != null) {
             return song;
@@ -128,6 +132,85 @@ final class LocalMarc {
             return null;
         }
         return new Plan("Playing " + query + ".", one("play_music", arg("query", query)), false, false);
+    }
+
+    private static Plan scripted(String raw, String low) {
+        if (low.contains("whatsapp") || low.contains("instagram")) {
+            return null;
+        }
+        String youtube = youtubeQuery(raw, low);
+        if (youtube != null) {
+            return openThenType("YouTube", youtube, true);
+        }
+        Matcher google = Pattern.compile("(?i)\\b(?:open\\s+)?google\\s+and\\s+search(?:\\s+for)?\\s+(.+)$").matcher(raw);
+        if (!google.find()) {
+            google = Pattern.compile("(?i)\\bsearch(?:\\s+on)?\\s+google\\s+(?:for\\s+)?(.+)$").matcher(raw);
+            if (!google.find()) {
+                google = null;
+            }
+        }
+        if (google != null) {
+            String query = google.group(1).replaceAll("[.]+$", "").trim();
+            if (!query.isEmpty()) {
+                return openThenType("Google", query, true);
+            }
+        }
+        Matcher typed = Pattern.compile("(?i)\\b(?:open|launch|start)\\s+(.+?)\\s+(?:and\\s+)?(?:then\\s+)?(?:type|enter|write)\\s+(?:in\\s+)?(.+)$").matcher(raw.trim());
+        if (typed.find()) {
+            String app = typed.group(1).replaceAll("[.]+$", "").trim();
+            String[] typedBody = typedBody(typed.group(2));
+            if (!app.isEmpty() && !typedBody[0].isEmpty()) {
+                return openThenType(app, typedBody[0], "1".equals(typedBody[1]));
+            }
+        }
+        return null;
+    }
+
+    private static String youtubeQuery(String raw, String low) {
+        if (!low.contains("youtube")) {
+            return null;
+        }
+        Matcher match = Pattern.compile("(?i)\\bsearch\\s+(?:on\\s+)?youtube\\s+(?:for\\s+)?(.+)$").matcher(raw);
+        if (!match.find()) {
+            match = Pattern.compile("(?i)\\byoutube\\s+(?:search\\s+)?(?:for\\s+)?(.+)$").matcher(raw);
+            if (!match.find()) {
+                match = Pattern.compile("(?i)\\b(?:search|play|find)\\s+(.+?)\\s+on\\s+youtube\\b").matcher(raw);
+                if (!match.find()) {
+                    return null;
+                }
+            }
+        }
+        return match.group(1).replaceAll("(?i)^(?:for|search\\s+for)\\s+", "").replaceAll("[.]+$", "").trim();
+    }
+
+    private static String[] typedBody(String raw) {
+        boolean send = raw.matches("(?i).*\\b(?:enter|send(?:\\s+it)?)\\b.*");
+        String body = raw.replaceAll("(?i)\\s+(?:and\\s+)?(?:then\\s+)?(?:hit |press )?(?:enter(?:\\s+and)?\\s*)?(?:send(?:\\s+it)?)?$", "")
+                .replaceAll("(?i)\\s+enter$", "")
+                .replaceAll("[.]+$", "")
+                .trim();
+        return new String[]{body, send ? "1" : "0"};
+    }
+
+    private static Plan openThenType(String app, String text, boolean send) {
+        JSONArray steps = new JSONArray();
+        JSONObject open = new JSONObject();
+        JSONObject type = new JSONObject();
+        try {
+            open.put("device", "phone");
+            open.put("tool", "open_app");
+            open.put("args", arg("name", app));
+            JSONObject args = arg("text", text);
+            args.put("send", send);
+            type.put("device", "phone");
+            type.put("tool", "type_into");
+            type.put("args", args);
+            steps.put(open);
+            steps.put(type);
+        } catch (JSONException ignored) {
+            return null;
+        }
+        return new Plan("Opening " + app + ".", steps, false, false);
     }
 
     private static Plan typeInto(String raw) {
